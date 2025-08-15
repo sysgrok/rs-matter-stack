@@ -14,10 +14,11 @@ use core::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
 use core::pin::pin;
 
 use edge_nal::{UdpBind, UdpSplit};
-use embassy_futures::select::{select4, Either4};
+use embassy_futures::select::{select, select4, Either4};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 
 use persist::{KvBlobBuffer, KvBlobStore, MatterPersist, NetworkPersist};
+
 use rs_matter::dm::clusters::basic_info::BasicInfoConfig;
 use rs_matter::dm::clusters::dev_att::DevAttDataFetcher;
 use rs_matter::dm::clusters::gen_diag::NetifDiag;
@@ -31,6 +32,7 @@ use rs_matter::transport::network::{Address, ChainedNetwork, NetworkReceive, Net
 use rs_matter::utils::epoch::Epoch;
 use rs_matter::utils::init::{init, Init};
 use rs_matter::utils::rand::Rand;
+use rs_matter::utils::select::Coalesce;
 use rs_matter::utils::storage::pooled::PooledBuffers;
 use rs_matter::{BasicCommData, Matter, MATTER_PORT};
 
@@ -477,7 +479,9 @@ where
         // Reset the Matter transport buffers and all sessions first
         // self.matter().reset_transport()?;
 
-        self.run_responder(handler).await
+        select(self.run_responder(&handler), handler.run())
+            .coalesce()
+            .await
     }
 
     async fn run_psm<S, C>(&self, persist: &MatterPersist<'_, S, C>) -> Result<(), Error>

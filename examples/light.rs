@@ -6,6 +6,7 @@
 //! If you want to use Ethernet, utilize `EthMatterStack` instead.
 //!
 //! The example implements a fictitious Light device (an On-Off Matter cluster).
+#![recursion_limit = "256"]
 
 use core::pin::pin;
 
