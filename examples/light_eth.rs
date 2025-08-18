@@ -8,6 +8,7 @@
 //! its credentials etc. and can assume it "pre-exists".
 //!
 //! The example implements a fictitious Light device (an On-Off Matter cluster).
+#![recursion_limit = "256"]
 
 use core::pin::pin;
 
