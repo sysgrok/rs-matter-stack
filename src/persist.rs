@@ -42,6 +42,7 @@ where
         let (mut kv, mut buf) = self.store.get().await;
 
         kv.remove(MatterStackKey::Fabrics as _, &mut buf).await?;
+        kv.remove(MatterStackKey::BasicInfo as _, &mut buf).await?;
         kv.remove(MatterStackKey::Networks as _, &mut buf).await?;
 
         self.networks.reset()?;
@@ -56,6 +57,15 @@ where
         kv.load(MatterStackKey::Fabrics as _, &mut buf, |data| {
             if let Some(data) = data {
                 self.matter.load_fabrics(data)?;
+            }
+
+            Ok(())
+        })
+        .await?;
+
+        kv.load(MatterStackKey::BasicInfo as _, &mut buf, |data| {
+            if let Some(data) = data {
+                self.matter.load_basic_info(data)?;
             }
 
             Ok(())
@@ -88,9 +98,14 @@ where
 
             if self.matter.fabrics_changed() {
                 kv.store(MatterStackKey::Fabrics as _, &mut buf, |buf| {
-                    self.matter
-                        .store_fabrics(buf)
-                        .map(|data| data.map(|data| data.len()).unwrap_or(0))
+                    self.matter.store_fabrics(buf)
+                })
+                .await?;
+            }
+
+            if self.matter.basic_info_changed() {
+                kv.store(MatterStackKey::BasicInfo as _, &mut buf, |buf| {
+                    self.matter.store_basic_info(buf)
                 })
                 .await?;
             }
@@ -169,7 +184,7 @@ where
     }
 
     fn store(&self, buf: &mut [u8]) -> Result<usize, Error> {
-        WirelessNetworks::store(self, buf).map(|data| data.map(|data| data.len()).unwrap_or(0))
+        WirelessNetworks::store(self, buf)
     }
 
     fn changed(&self) -> bool {
@@ -218,7 +233,8 @@ pub const VENDOR_KEYS_START: u16 = 0x1000;
 #[repr(u16)]
 pub enum MatterStackKey {
     Fabrics = 0,
-    Networks = 1,
+    BasicInfo = 1,
+    Networks = 2,
 }
 
 impl TryFrom<u16> for MatterStackKey {
@@ -227,7 +243,8 @@ impl TryFrom<u16> for MatterStackKey {
     fn try_from(value: u16) -> Result<Self, Self::Error> {
         match value {
             0 => Ok(MatterStackKey::Fabrics),
-            1 => Ok(MatterStackKey::Networks),
+            1 => Ok(MatterStackKey::BasicInfo),
+            2 => Ok(MatterStackKey::Networks),
             _ => Err(()),
         }
     }
@@ -237,6 +254,7 @@ impl Display for MatterStackKey {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let s = match self {
             MatterStackKey::Fabrics => "fabrics",
+            MatterStackKey::BasicInfo => "basic-info",
             MatterStackKey::Networks => "networks",
         };
 
@@ -249,6 +267,7 @@ impl defmt::Format for MatterStackKey {
     fn format(&self, f: defmt::Formatter<'_>) {
         let s = match self {
             MatterStackKey::Fabrics => "fabrics",
+            MatterStackKey::BasicInfo => "basic-info",
             MatterStackKey::Networks => "networks",
         };
 
