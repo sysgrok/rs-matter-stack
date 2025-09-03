@@ -13,8 +13,8 @@ readme = "README.md"
 rust-version = "1.77"
 
 [patch.crates-io]
-rs-matter = { git = "https://github.com/project-chip/rs-matter" }
-#rs-matter = { git = "https://github.com/sysgrok/rs-matter", branch = "next" }
+#rs-matter = { git = "https://github.com/project-chip/rs-matter" }
+rs-matter = { git = "https://github.com/sysgrok/rs-matter", branch = "next" }
 #rs-matter = { path = "../rs-matter/rs-matter" }
 #edge-nal = { git = "https://github.com/sysgrok/edge-net" }
 #edge-nal-std = { git = "https://github.com/sysgrok/edge-net" }
@@ -171,7 +171,7 @@ bitflags = { version =  "2.5", default-features = false }
 scopeguard = { version = "1", default-features = false }
 embassy-futures = "0.1"
 embassy-sync = "0.7"
-embassy-time = "0.4"
+embassy-time = "0.5"
 embedded-svc = { version = "0.28", default-features = false }
 rs-matter = { version = "0.1", default-features = false }
 edge-nal = "0.5"
@@ -189,7 +189,7 @@ static_cell = "2.1"
 futures-lite = "1"
 async-compat = "0.2"
 env_logger = "0.11"
-embassy-time-queue-utils = { version = "0.1", features = ["generic-queue-64"] }
+embassy-time-queue-utils = { version = "0.3", features = ["generic-queue-64"] }
 
 [[example]]
 name = "light_eth"
