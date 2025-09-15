@@ -13,6 +13,7 @@ use core::future::Future;
 use core::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
 use core::pin::pin;
 
+use cfg_if::cfg_if;
 use edge_nal::{UdpBind, UdpSplit};
 use embassy_futures::select::{select, select4, Either4};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
@@ -71,9 +72,117 @@ mod private {
     impl Sealed for () {}
 }
 
-const MAX_SUBSCRIPTIONS: usize = 3;
-const MAX_IM_BUFFERS: usize = 10;
-const MAX_RESPONDERS: usize = 4;
+cfg_if! {
+    if #[cfg(feature = "max-subscriptions-32")] {
+        /// Max number of subscriptions
+        const MAX_SUBSCRIPTIONS: usize = 32;
+    } else if #[cfg(feature = "max-subscriptions-16")] {
+        /// Max number of subscriptions
+        const MAX_SUBSCRIPTIONS: usize = 16;
+    } else if #[cfg(feature = "max-subscriptions-8")] {
+        /// Max number of subscriptions
+        const MAX_SUBSCRIPTIONS: usize = 8;
+    } else if #[cfg(feature = "max-subscriptions-7")] {
+        /// Max number of subscriptions
+        const MAX_SUBSCRIPTIONS: usize = 7;
+    } else if #[cfg(feature = "max-subscriptions-6")] {
+        /// Max number of subscriptions
+        const MAX_SUBSCRIPTIONS: usize = 6;
+    } else if #[cfg(feature = "max-subscriptions-5")] {
+        /// Max number of subscriptions
+        const MAX_SUBSCRIPTIONS: usize = 5;
+    } else if #[cfg(feature = "max-subscriptions-4")] {
+        /// Max number of subscriptions
+        const MAX_SUBSCRIPTIONS: usize = 4;
+    } else if #[cfg(feature = "max-subscriptions-3")] {
+        /// Max number of subscriptions
+        const MAX_SUBSCRIPTIONS: usize = 3;
+    } else if #[cfg(feature = "max-subscriptions-2")] {
+        /// Max number of subscriptions
+        const MAX_SUBSCRIPTIONS: usize = 2;
+    } else if #[cfg(feature = "max-subscriptions-1")] {
+        /// Max number of subscriptions
+        const MAX_SUBSCRIPTIONS: usize = 1;
+    } else {
+        /// Max number of subscriptions
+        const MAX_SUBSCRIPTIONS: usize = 3;
+    }
+}
+
+cfg_if! {
+    if #[cfg(feature = "max-im-buffers-64")] {
+        /// Max number of IM buffers
+        const MAX_IM_BUFFERS: usize = 64;
+    } else if #[cfg(feature = "max-im-buffers-32")] {
+        /// Max number of IM buffers
+        const MAX_IM_BUFFERS: usize = 32;
+    } else if #[cfg(feature = "max-im-buffers-16")] {
+        /// Max number of IM buffers
+        const MAX_IM_BUFFERS: usize = 16;
+    } else if #[cfg(feature = "max-im-buffers-10")] {
+        /// Max number of IM buffers
+        const MAX_IM_BUFFERS: usize = 10;
+    } else if #[cfg(feature = "max-im-buffers-9")] {
+        /// Max number of IM buffers
+        const MAX_IM_BUFFERS: usize = 9;
+    } else if #[cfg(feature = "max-im-buffers-8")] {
+        /// Max number of IM buffers
+        const MAX_IM_BUFFERS: usize = 8;
+    } else if #[cfg(feature = "max-im-buffers-7")] {
+        /// Max number of IM buffers
+        const MAX_IM_BUFFERS: usize = 7;
+    } else if #[cfg(feature = "max-im-buffers-6")] {
+        /// Max number of IM buffers
+        const MAX_IM_BUFFERS: usize = 6;
+    } else if #[cfg(feature = "max-im-buffers-5")] {
+        /// Max number of IM buffers
+        const MAX_IM_BUFFERS: usize = 5;
+    } else if #[cfg(feature = "max-im-buffers-4")] {
+        /// Max number of IM buffers
+        const MAX_IM_BUFFERS: usize = 4;
+    } else {
+        /// Max number of IM buffers
+        const MAX_IM_BUFFERS: usize = 10;
+    }
+}
+
+cfg_if! {
+    if #[cfg(feature = "max-responders-32")] {
+        /// Max number of concurrent responders
+        const MAX_RESPONDERS: usize = 32;
+    } else if #[cfg(feature = "max-responders-16")] {
+        /// Max number of concurrent responders
+        const MAX_RESPONDERS: usize = 16;
+    } else if #[cfg(feature = "max-responders-8")] {
+        /// Max number of concurrent responders
+        const MAX_RESPONDERS: usize = 8;
+    } else if #[cfg(feature = "max-responders-7")] {
+        /// Max number of concurrent responders
+        const MAX_RESPONDERS: usize = 7;
+    } else if #[cfg(feature = "max-responders-6")] {
+        /// Max number of concurrent responders
+        const MAX_RESPONDERS: usize = 6;
+    } else if #[cfg(feature = "max-responders-5")] {
+        /// Max number of concurrent responders
+        const MAX_RESPONDERS: usize = 5;
+    } else if #[cfg(feature = "max-responders-4")] {
+        /// Max number of concurrent responders
+        const MAX_RESPONDERS: usize = 4;
+    } else if #[cfg(feature = "max-responders-3")] {
+        /// Max number of concurrent responders
+        const MAX_RESPONDERS: usize = 3;
+    } else if #[cfg(feature = "max-responders-2")] {
+        /// Max number of concurrent responders
+        const MAX_RESPONDERS: usize = 2;
+    } else if #[cfg(feature = "max-responders-1")] {
+        /// Max number of concurrent responders
+        const MAX_RESPONDERS: usize = 1;
+    } else {
+        /// Max number of concurrent responders
+        const MAX_RESPONDERS: usize = 4;
+    }
+}
+
 const MAX_BUSY_RESPONDERS: usize = 2;
 
 /// The `MatterStack` struct is the main entry point for the Matter stack.
