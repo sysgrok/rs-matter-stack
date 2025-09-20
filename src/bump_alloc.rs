@@ -1,30 +1,30 @@
-/// A simple bump allocator for fixed-size memory chunks
-///
-/// This allocator is designed for allocating objects that have a known maximum lifetime.
-/// All allocations are freed when the allocator is dropped.
+//! A simple bump allocator for fixed-size memory chunks
+//!
+//! This allocator is designed for allocating objects that have a known maximum lifetime.
+//! All allocations are freed when the allocator is dropped.
+
 use core::alloc::Layout;
-use core::cell::Cell;
+use core::cell::RefCell;
 use core::mem::MaybeUninit;
 use core::pin::Pin;
 use core::ptr::NonNull;
 
-/// A bump allocator that uses a provided memory chunk
-pub struct BumpAllocator<'a> {
+struct Inner<'a> {
     memory: &'a mut [MaybeUninit<u8>],
-    offset: Cell<usize>,
+    offset: usize,
 }
 
-impl<'a> BumpAllocator<'a> {
+/// A bump allocator that uses a provided memory chunk
+pub struct BumpAlloc<'a>(RefCell<Inner<'a>>);
+
+impl<'a> BumpAlloc<'a> {
     /// Create a new bump allocator with the provided memory chunk
-    pub fn new(memory: &'a mut [MaybeUninit<u8>]) -> Self {
-        Self {
-            memory,
-            offset: Cell::new(0),
-        }
+    pub const fn new(memory: &'a mut [MaybeUninit<u8>]) -> Self {
+        Self(RefCell::new(Inner { memory, offset: 0 }))
     }
 
     /// Allocate memory for an object and pin it
-    pub fn alloc_pin<T>(&mut self, object: T) -> Result<Pin<BumpBox<'_, T>>, AllocError>
+    pub fn box_pin<T>(&self, object: T) -> Result<Pin<BumpBox<'_, T>>, AllocError>
     where
         T: Sized,
     {
@@ -42,36 +42,38 @@ impl<'a> BumpAllocator<'a> {
         }
     }
 
-    fn alloc_raw(&mut self, layout: Layout) -> Result<NonNull<u8>, AllocError> {
+    fn alloc_raw(&self, layout: Layout) -> Result<NonNull<u8>, AllocError> {
         let size = layout.size();
         let align = layout.align();
 
-        let current_offset = self.offset.get();
+        let mut inner = self.0.borrow_mut();
+
+        let current_offset = inner.offset;
 
         // Align the offset
         let aligned_offset = (current_offset + align - 1) & !(align - 1);
         let new_offset = aligned_offset + size;
 
-        if new_offset > self.memory.len() {
+        if new_offset > inner.memory.len() {
             return Err(AllocError);
         }
 
-        self.offset.set(new_offset);
+        inner.offset = new_offset;
 
         // Safety: We checked bounds and alignment
-        let ptr = unsafe { self.memory.as_mut_ptr().add(aligned_offset) as *mut u8 };
+        let ptr = unsafe { inner.memory.as_mut_ptr().add(aligned_offset) as *mut u8 };
 
         Ok(unsafe { NonNull::new_unchecked(ptr) })
     }
 
     /// Get the current memory usage
     pub fn used(&self) -> usize {
-        self.offset.get()
+        self.0.borrow().offset
     }
 
     /// Get the total capacity
     pub fn capacity(&self) -> usize {
-        self.memory.len()
+        self.0.borrow().memory.len()
     }
 }
 

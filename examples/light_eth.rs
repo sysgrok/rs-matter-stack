@@ -9,7 +9,9 @@
 //!
 //! The example implements a fictitious Light device (an On-Off Matter cluster).
 #![recursion_limit = "256"]
+#![feature(maybe_uninit_uninit_array_transpose)]
 
+use core::mem::MaybeUninit;
 use core::pin::pin;
 
 use embassy_futures::select::select;
@@ -18,6 +20,7 @@ use embassy_time::{Duration, Timer};
 use env_logger::Target;
 use log::info;
 
+use rs_matter_stack::bump_alloc::BumpAlloc;
 use rs_matter_stack::eth::EthMatterStack;
 use rs_matter_stack::matter::dm::clusters::desc;
 use rs_matter_stack::matter::dm::clusters::desc::ClusterHandler as _;
@@ -77,11 +80,17 @@ fn main() -> Result<(), Error> {
             Async(desc::DescHandler::new(Dataver::new_rand(stack.matter().rand())).adapt()),
         );
 
+    static ALLOC_MEM: StaticCell<[u8; 90000]> = StaticCell::new();
+    let alloc_mem = ALLOC_MEM.uninit();
+    let ptr = alloc_mem.as_mut_ptr() as *mut MaybeUninit<u8>;
+    let p: &'static mut [MaybeUninit<u8>] = unsafe { core::slice::from_raw_parts_mut(ptr as _, 90000) };
+    let bump_alloc = BumpAlloc::new(p);
+
     // Run the Matter stack with our handler
     // Using `pin!` is completely optional, but saves some memory due to `rustc`
     // not being very intelligent w.r.t. stack usage in async functions
     let store = stack.create_shared_store(DirKvBlobStore::new_default());
-    let mut matter = pin!(stack.run_preex(
+    let mut matter = pin!(stack.run_preex2(
         // The Matter stack needs UDP sockets to communicate with other Matter devices
         edge_nal_std::Stack::new(),
         // Will try to find a default network interface
@@ -94,6 +103,7 @@ fn main() -> Result<(), Error> {
         (NODE, handler),
         // No user task future to run
         (),
+        &bump_alloc,
     ));
 
     // Just for demoing purposes:

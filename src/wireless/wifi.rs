@@ -1,10 +1,7 @@
-use core::mem::MaybeUninit;
 use core::pin::pin;
 
 use embassy_futures::select::{select, select3, select4};
 use embassy_sync::blocking_mutex::raw::RawMutex;
-
-use crate::bump_alloc::BumpAllocator;
 
 use rs_matter::dm::clusters::gen_comm::CommPolicy;
 use rs_matter::dm::clusters::gen_diag::GenDiag;
@@ -23,6 +20,7 @@ use rs_matter::transport::network::btp::GattPeripheral;
 use rs_matter::transport::network::NoNetwork;
 use rs_matter::utils::select::Coalesce;
 
+use crate::bump_alloc::BumpAlloc;
 use crate::mdns::Mdns;
 use crate::nal::NetStack;
 use crate::network::Embedding;
@@ -165,7 +163,7 @@ where
         store: &SharedKvBlobStore<'_, S>,
         handler: H,
         user: U,
-        memory: &mut [MaybeUninit<u8>],
+        alloc: &'static BumpAlloc<'_>,
     ) -> Result<(), Error>
     where
         W: Wifi + Gatt,
@@ -181,8 +179,9 @@ where
 
         self.matter().reset_transport()?;
 
-        let mut net_task = pin!(self.run_wifi_with_memory(wifi, handler, user, memory));
-        let mut persist_task = pin!(self.run_psm(&persist));
+        let mut net_task =
+            unwrap!(alloc.box_pin(self.run_wifi_with_memory(wifi, handler, user, alloc)));
+        let mut persist_task = unwrap!(alloc.box_pin(self.run_psm(&persist)));
 
         select(&mut net_task, &mut persist_task).coalesce().await
     }
@@ -244,7 +243,7 @@ where
         mut wifi: W,
         handler: H,
         mut user: U,
-        memory: &mut [MaybeUninit<u8>],
+        alloc: &'static BumpAlloc<'_>,
     ) -> Result<(), Error>
     where
         W: Wifi + Gatt,
@@ -261,7 +260,7 @@ where
 
                 Gatt::run(
                     &mut wifi,
-                    MatterStackWirelessTaskWithMemory(self, &handler, &mut user, memory),
+                    MatterStackWirelessTaskWithMemory(self, &handler, &mut user, alloc),
                 )
                 .await?;
             }
@@ -272,7 +271,7 @@ where
 
             Wifi::run(
                 &mut wifi,
-                MatterStackWirelessTaskWithMemory(self, &handler, &mut user, memory),
+                MatterStackWirelessTaskWithMemory(self, &handler, &mut user, alloc),
             )
             .await?;
         }
@@ -600,7 +599,8 @@ where
     }
 }
 
-impl<M, E, H, U> GattTask for MatterStackWirelessTaskWithMemory<'static, M, wireless::Wifi, E, H, U>
+impl<M, E, H, U> GattTask
+    for MatterStackWirelessTaskWithMemory<'static, '_, M, wireless::Wifi, E, H, U>
 where
     M: RawMutex + Send + Sync + 'static,
     E: Embedding + 'static,
@@ -615,34 +615,29 @@ where
             NoopWirelessNetCtl::new(NetworkType::Wifi),
         );
 
-        // Create bump allocator from provided memory
-        let mut allocator = BumpAllocator::new(self.3);
-
         // Use bump allocator instead of stack allocation for largest futures
-        let btp_task = allocator
-            .alloc_pin(self.0.run_btp(peripheral))
-            .map_err(|_| {
-                rs_matter::error::Error::new(rs_matter::error::ErrorCode::NoMemory)
-            })?;
+        let btp_task = self
+            .3
+            .box_pin(self.0.run_btp(peripheral))
+            .map_err(|_| rs_matter::error::Error::new(rs_matter::error::ErrorCode::NoMemory))?;
 
         let handler = self.0.root_handler(&(), &(), &net_ctl, &false, &self.1);
-        let handler_task = allocator
-            .alloc_pin(self.0.run_handler((&self.1, handler)))
-            .map_err(|_| {
-                rs_matter::error::Error::new(rs_matter::error::ErrorCode::NoMemory)
-            })?;
+        let handler_task = self
+            .3
+            .box_pin(self.0.run_handler((&self.1, handler)))
+            .map_err(|_| rs_matter::error::Error::new(rs_matter::error::ErrorCode::NoMemory))?;
 
         info!(
             "Bump allocator usage: {}/{} bytes",
-            allocator.used(),
-            allocator.capacity()
+            self.3.used(),
+            self.3.capacity()
         );
 
         select(btp_task, handler_task).coalesce().await
     }
 }
 
-impl<M, E, H, X> WifiTask for MatterStackWirelessTaskWithMemory<'static, M, wireless::Wifi, E, H, X>
+impl<M, E, H, X> WifiTask for MatterStackWirelessTaskWithMemory<'_, '_, M, wireless::Wifi, E, H, X>
 where
     M: RawMutex + Send + Sync + 'static,
     E: Embedding + 'static,
@@ -670,21 +665,17 @@ where
 
         let stack = &mut self.0;
 
-        // Create bump allocator from provided memory
-        let mut allocator = BumpAllocator::new(self.3);
-
         // Use bump allocator instead of stack allocation for largest futures
-        let net_task = allocator
-            .alloc_pin(stack.run_oper_net(
+        let net_task = self
+            .3
+            .box_pin(stack.run_oper_net(
                 &net_stack,
                 &netif,
                 &mut mdns,
                 core::future::pending(),
                 Option::<(NoNetwork, NoNetwork)>::None,
             ))
-            .map_err(|_| {
-                rs_matter::error::Error::new(rs_matter::error::ErrorCode::NoMemory)
-            })?;
+            .map_err(|_| rs_matter::error::Error::new(rs_matter::error::ErrorCode::NoMemory))?;
 
         let mut mgr_task = pin!(mgr.run());
 
@@ -693,18 +684,17 @@ where
         let handler = self
             .0
             .root_handler(&(), &netif, &net_ctl_s, &false, &self.1);
-        let handler_task = allocator
-            .alloc_pin(self.0.run_handler((&self.1, handler)))
-            .map_err(|_| {
-                rs_matter::error::Error::new(rs_matter::error::ErrorCode::NoMemory)
-            })?;
+        let handler_task = self
+            .3
+            .box_pin(self.0.run_handler((&self.1, handler)))
+            .map_err(|_| rs_matter::error::Error::new(rs_matter::error::ErrorCode::NoMemory))?;
 
         let mut user_task = pin!(self.2.run(&net_stack, &netif));
 
         info!(
             "Bump allocator usage: {}/{} bytes",
-            allocator.used(),
-            allocator.capacity()
+            self.3.used(),
+            self.3.capacity()
         );
 
         select4(net_task, &mut mgr_task, handler_task, &mut user_task)
@@ -714,7 +704,7 @@ where
 }
 
 impl<M, E, H, X> WifiCoexTask
-    for MatterStackWirelessTaskWithMemory<'static, M, wireless::Wifi, E, H, X>
+    for MatterStackWirelessTaskWithMemory<'static, '_, M, wireless::Wifi, E, H, X>
 where
     M: RawMutex + Send + Sync + 'static,
     E: Embedding + 'static,
@@ -740,31 +730,26 @@ where
 
         let stack = &mut self.0;
 
-        // Create bump allocator from provided memory
-        let mut allocator = BumpAllocator::new(self.3);
-
         // Use bump allocator instead of stack allocation for largest futures
-        let net_task = allocator
-            .alloc_pin(stack.run_net_coex(&net_stack, &netif, &net_ctl, &mut mdns, &mut gatt))
-            .map_err(|_| {
-                rs_matter::error::Error::new(rs_matter::error::ErrorCode::NoMemory)
-            })?;
+        let net_task = self
+            .3
+            .box_pin(stack.run_net_coex(&net_stack, &netif, &net_ctl, &mut mdns, &mut gatt))
+            .map_err(|_| rs_matter::error::Error::new(rs_matter::error::ErrorCode::NoMemory))?;
 
         let net_ctl_s = NetCtlWithStatusImpl::new(&self.0.network.net_state, &net_ctl);
 
         let handler = self.0.root_handler(&(), &netif, &net_ctl_s, &true, &self.1);
-        let handler_task = allocator
-            .alloc_pin(self.0.run_handler((&self.1, handler)))
-            .map_err(|_| {
-                rs_matter::error::Error::new(rs_matter::error::ErrorCode::NoMemory)
-            })?;
+        let handler_task = self
+            .3
+            .box_pin(self.0.run_handler((&self.1, handler)))
+            .map_err(|_| rs_matter::error::Error::new(rs_matter::error::ErrorCode::NoMemory))?;
 
         let mut user_task = pin!(self.2.run(&net_stack, &netif));
 
         info!(
             "Bump allocator usage: {}/{} bytes",
-            allocator.used(),
-            allocator.capacity()
+            self.3.used(),
+            self.3.capacity()
         );
 
         select3(net_task, handler_task, &mut user_task)

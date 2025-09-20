@@ -1,4 +1,3 @@
-use core::mem::MaybeUninit;
 use core::pin::pin;
 
 use embassy_futures::select::{select, select3};
@@ -20,6 +19,7 @@ use rs_matter::utils::init::{init, zeroed, Init};
 use rs_matter::utils::select::Coalesce;
 use rs_matter::utils::sync::{blocking, IfMutex};
 
+use crate::bump_alloc::BumpAlloc;
 use crate::mdns::Mdns;
 use crate::nal::NetStack;
 use crate::network::{Embedding, Network};
@@ -338,11 +338,11 @@ where
     T: WirelessNetwork,
     E: Embedding + 'static;
 
-pub(crate) struct MatterStackWirelessTaskWithMemory<'a, M, T, E, H, U>(
+pub(crate) struct MatterStackWirelessTaskWithMemory<'a, 'b, M, T, E, H, U>(
     &'a MatterStack<'a, WirelessBle<M, T, E>>,
     H,
     U,
-    &'a mut [MaybeUninit<u8>],
+    &'a BumpAlloc<'b>,
 )
 where
     M: RawMutex + Send + Sync + 'static,
