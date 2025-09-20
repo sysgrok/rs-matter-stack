@@ -1,8 +1,11 @@
 use core::pin::pin;
+use core::mem::MaybeUninit;
 extern crate alloc;
 use alloc::boxed::Box;
 
 use embassy_futures::select::{select, select3};
+
+use crate::bump_alloc::BumpAllocator;
 
 use rs_matter::dm::clusters::gen_comm::CommPolicy;
 use rs_matter::dm::clusters::gen_diag::{GenDiag, NetifDiag};
@@ -249,6 +252,49 @@ where
         select(&mut net_task, &mut persist_task).coalesce().await
     }
 
+    /// Run the Matter stack for an Ethernet network with bump allocation.
+    /// Uses the provided memory buffer for allocations instead of heap.
+    ///
+    /// Parameters:
+    /// - `ethernet` - a user-provided `Ethernet` implementation
+    /// - `persist` - a user-provided `Persist` implementation
+    /// - `handler` - a user-provided DM handler implementation
+    /// - `user` - a user-provided future that will be polled only when the netif interface is up
+    /// - `memory` - a memory buffer for internal allocations (recommended size: 16KB+)
+    pub async fn run_with_memory<N, S, H, X>(
+        &self,
+        ethernet: N,
+        store: &SharedKvBlobStore<'_, S>,
+        handler: H,
+        user: X,
+        memory: &mut [MaybeUninit<u8>],
+    ) -> Result<(), Error>
+    where
+        N: Ethernet,
+        S: KvBlobStore,
+        H: AsyncHandler + AsyncMetadata,
+        X: UserTask,
+    {
+        info!("Matter Stack memory: {}B", core::mem::size_of_val(self));
+
+        let persist = self.create_persist(store);
+
+        persist.load().await?;
+
+        self.matter().reset_transport()?;
+
+        if !self.is_commissioned().await? {
+            self.matter()
+                .enable_basic_commissioning(DiscoveryCapabilities::IP, 0)
+                .await?; // TODO
+        }
+
+        let mut net_task = pin!(self.run_ethernet_with_memory(ethernet, handler, user, memory));
+        let mut persist_task = pin!(self.run_psm(&persist));
+
+        select(&mut net_task, &mut persist_task).coalesce().await
+    }
+
     async fn run_ethernet<N, H, X>(&self, mut ethernet: N, handler: H, user: X) -> Result<(), Error>
     where
         N: Ethernet,
@@ -257,9 +303,30 @@ where
     {
         Ethernet::run(&mut ethernet, MatterStackEthernetTask(self, handler, user)).await
     }
+
+    async fn run_ethernet_with_memory<N, H, X>(
+        &self, 
+        mut ethernet: N, 
+        handler: H, 
+        user: X,
+        memory: &mut [MaybeUninit<u8>]
+    ) -> Result<(), Error>
+    where
+        N: Ethernet,
+        H: AsyncHandler + AsyncMetadata,
+        X: UserTask,
+    {
+        Ethernet::run(&mut ethernet, MatterStackEthernetTaskWithMemory(self, handler, user, memory)).await
+    }
 }
 
 struct MatterStackEthernetTask<'a, E, H, X>(&'a MatterStack<'a, Eth<E>>, H, X)
+where
+    E: Embedding + 'static,
+    H: AsyncMetadata + AsyncHandler,
+    X: UserTask;
+
+struct MatterStackEthernetTaskWithMemory<'a, E, H, X>(&'a MatterStack<'a, Eth<E>>, H, X, &'a mut [MaybeUninit<u8>])
 where
     E: Embedding + 'static,
     H: AsyncMetadata + AsyncHandler,
@@ -292,6 +359,46 @@ where
         let handler_task = Box::pin(self.0.run_handler((&self.1, handler)));
 
         let mut user_task = pin!(self.2.run(&net_stack, &netif));
+
+        select3(net_task, handler_task, &mut user_task)
+            .coalesce()
+            .await
+    }
+}
+
+impl<E, H, X> EthernetTask for MatterStackEthernetTaskWithMemory<'_, E, H, X>
+where
+    E: Embedding + 'static,
+    H: AsyncMetadata + AsyncHandler,
+    X: UserTask,
+{
+    async fn run<S, C, M>(&mut self, net_stack: S, netif: C, mut mdns: M) -> Result<(), Error>
+    where
+        S: NetStack,
+        C: NetifDiag + NetChangeNotif,
+        M: Mdns,
+    {
+        info!("Ethernet driver started with bump allocator");
+        
+        // Create bump allocator from provided memory
+        let mut allocator = BumpAllocator::new(self.3);
+        
+        // Use bump allocator instead of Box::pin for largest futures
+        let net_task = allocator.alloc_pin(self.0.run_oper_net(
+            &net_stack,
+            &netif,
+            &mut mdns,
+            core::future::pending(),
+            Option::<(NoNetwork, NoNetwork)>::None,
+        )).map_err(|_| rs_matter::error::Error::new(rs_matter::error::ErrorCode::NoMemory, false))?;
+
+        let handler = self.0.root_handler(&(), &true, &netif, &self.1);
+        let handler_task = allocator.alloc_pin(self.0.run_handler((&self.1, handler)))
+            .map_err(|_| rs_matter::error::Error::new(rs_matter::error::ErrorCode::NoMemory, false))?;
+
+        let mut user_task = pin!(self.2.run(&net_stack, &netif));
+
+        info!("Bump allocator usage: {}/{} bytes", allocator.used(), allocator.capacity());
 
         select3(net_task, handler_task, &mut user_task)
             .coalesce()

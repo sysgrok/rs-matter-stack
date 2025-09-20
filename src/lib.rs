@@ -9,6 +9,8 @@
 #![warn(clippy::large_stack_frames)]
 #![warn(clippy::large_types_passed_by_value)]
 
+pub mod bump_alloc;
+
 use core::future::Future;
 use core::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
 use core::pin::pin;
