@@ -1,4 +1,6 @@
 use core::pin::pin;
+extern crate alloc;
+use alloc::boxed::Box;
 
 use embassy_futures::select::{select, select3};
 
@@ -277,7 +279,8 @@ where
     {
         info!("Ethernet driver started");
 
-        let mut net_task = pin!(self.0.run_oper_net(
+        // Box the largest futures to reduce stack frame size
+        let net_task = Box::pin(self.0.run_oper_net(
             &net_stack,
             &netif,
             &mut mdns,
@@ -286,11 +289,11 @@ where
         ));
 
         let handler = self.0.root_handler(&(), &true, &netif, &self.1);
-        let mut handler_task = pin!(self.0.run_handler((&self.1, handler)));
+        let handler_task = Box::pin(self.0.run_handler((&self.1, handler)));
 
         let mut user_task = pin!(self.2.run(&net_stack, &netif));
 
-        select3(&mut net_task, &mut handler_task, &mut user_task)
+        select3(net_task, handler_task, &mut user_task)
             .coalesce()
             .await
     }
