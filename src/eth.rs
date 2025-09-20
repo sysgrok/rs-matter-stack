@@ -1,7 +1,5 @@
-use core::pin::pin;
 use core::mem::MaybeUninit;
-extern crate alloc;
-use alloc::boxed::Box;
+use core::pin::pin;
 
 use embassy_futures::select::{select, select3};
 
@@ -305,18 +303,22 @@ where
     }
 
     async fn run_ethernet_with_memory<N, H, X>(
-        &self, 
-        mut ethernet: N, 
-        handler: H, 
+        &self,
+        mut ethernet: N,
+        handler: H,
         user: X,
-        memory: &mut [MaybeUninit<u8>]
+        memory: &mut [MaybeUninit<u8>],
     ) -> Result<(), Error>
     where
         N: Ethernet,
         H: AsyncHandler + AsyncMetadata,
         X: UserTask,
     {
-        Ethernet::run(&mut ethernet, MatterStackEthernetTaskWithMemory(self, handler, user, memory)).await
+        Ethernet::run(
+            &mut ethernet,
+            MatterStackEthernetTaskWithMemory(self, handler, user, memory),
+        )
+        .await
     }
 }
 
@@ -326,7 +328,12 @@ where
     H: AsyncMetadata + AsyncHandler,
     X: UserTask;
 
-struct MatterStackEthernetTaskWithMemory<'a, E, H, X>(&'a MatterStack<'a, Eth<E>>, H, X, &'a mut [MaybeUninit<u8>])
+struct MatterStackEthernetTaskWithMemory<'a, E, H, X>(
+    &'a MatterStack<'a, Eth<E>>,
+    H,
+    X,
+    &'a mut [MaybeUninit<u8>],
+)
 where
     E: Embedding + 'static,
     H: AsyncMetadata + AsyncHandler,
@@ -346,8 +353,7 @@ where
     {
         info!("Ethernet driver started");
 
-        // Box the largest futures to reduce stack frame size
-        let net_task = Box::pin(self.0.run_oper_net(
+        let mut net_task = pin!(self.0.run_oper_net(
             &net_stack,
             &netif,
             &mut mdns,
@@ -356,11 +362,11 @@ where
         ));
 
         let handler = self.0.root_handler(&(), &true, &netif, &self.1);
-        let handler_task = Box::pin(self.0.run_handler((&self.1, handler)));
+        let mut handler_task = pin!(self.0.run_handler((&self.1, handler)));
 
         let mut user_task = pin!(self.2.run(&net_stack, &netif));
 
-        select3(net_task, handler_task, &mut user_task)
+        select3(&mut net_task, &mut handler_task, &mut user_task)
             .coalesce()
             .await
     }
@@ -379,26 +385,37 @@ where
         M: Mdns,
     {
         info!("Ethernet driver started with bump allocator");
-        
+
         // Create bump allocator from provided memory
         let mut allocator = BumpAllocator::new(self.3);
-        
-        // Use bump allocator instead of Box::pin for largest futures
-        let net_task = allocator.alloc_pin(self.0.run_oper_net(
-            &net_stack,
-            &netif,
-            &mut mdns,
-            core::future::pending(),
-            Option::<(NoNetwork, NoNetwork)>::None,
-        )).map_err(|_| rs_matter::error::Error::new(rs_matter::error::ErrorCode::NoMemory, false))?;
+
+        // Use bump allocator instead of stack allocation for largest futures
+        let net_task = allocator
+            .alloc_pin(self.0.run_oper_net(
+                &net_stack,
+                &netif,
+                &mut mdns,
+                core::future::pending(),
+                Option::<(NoNetwork, NoNetwork)>::None,
+            ))
+            .map_err(|_| {
+                rs_matter::error::Error::new(rs_matter::error::ErrorCode::NoMemory, false)
+            })?;
 
         let handler = self.0.root_handler(&(), &true, &netif, &self.1);
-        let handler_task = allocator.alloc_pin(self.0.run_handler((&self.1, handler)))
-            .map_err(|_| rs_matter::error::Error::new(rs_matter::error::ErrorCode::NoMemory, false))?;
+        let handler_task = allocator
+            .alloc_pin(self.0.run_handler((&self.1, handler)))
+            .map_err(|_| {
+                rs_matter::error::Error::new(rs_matter::error::ErrorCode::NoMemory, false)
+            })?;
 
         let mut user_task = pin!(self.2.run(&net_stack, &netif));
 
-        info!("Bump allocator usage: {}/{} bytes", allocator.used(), allocator.capacity());
+        info!(
+            "Bump allocator usage: {}/{} bytes",
+            allocator.used(),
+            allocator.capacity()
+        );
 
         select3(net_task, handler_task, &mut user_task)
             .coalesce()

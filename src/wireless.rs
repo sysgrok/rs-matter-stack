@@ -1,7 +1,10 @@
+use core::mem::MaybeUninit;
 use core::pin::pin;
 
 use embassy_futures::select::{select, select3};
 use embassy_sync::blocking_mutex::raw::RawMutex;
+
+use crate::bump_alloc::BumpAllocator;
 
 use rs_matter::dm::clusters::gen_diag::NetifDiag;
 use rs_matter::dm::clusters::net_comm::NetCtl;
@@ -331,6 +334,17 @@ pub(crate) struct MatterStackWirelessTask<'a, M, T, E, H, U>(
     &'a MatterStack<'a, WirelessBle<M, T, E>>,
     H,
     U,
+)
+where
+    M: RawMutex + Send + Sync + 'static,
+    T: WirelessNetwork,
+    E: Embedding + 'static;
+
+pub(crate) struct MatterStackWirelessTaskWithMemory<'a, M, T, E, H, U>(
+    &'a MatterStack<'a, WirelessBle<M, T, E>>,
+    H,
+    U,
+    &'a mut [MaybeUninit<u8>],
 )
 where
     M: RawMutex + Send + Sync + 'static,

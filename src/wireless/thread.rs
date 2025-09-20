@@ -1,6 +1,4 @@
 use core::pin::pin;
-extern crate alloc;
-use alloc::boxed::Box;
 
 use embassy_futures::select::{select, select3, select4};
 use embassy_sync::blocking_mutex::raw::RawMutex;
@@ -417,13 +415,12 @@ where
             NoopWirelessNetCtl::new(NetworkType::Thread),
         );
 
-        // Box the largest futures to reduce stack frame size
-        let btp_task = Box::pin(self.0.run_btp(peripheral));
+        let mut btp_task = pin!(self.0.run_btp(peripheral));
 
         let handler = self.0.root_handler(&(), &(), &net_ctl, &false, &self.1);
-        let handler_task = Box::pin(self.0.run_handler((&self.1, handler)));
+        let mut handler_task = pin!(self.0.run_handler((&self.1, handler)));
 
-        select(btp_task, handler_task).coalesce().await
+        select(&mut btp_task, &mut handler_task).coalesce().await
     }
 }
 
@@ -455,8 +452,7 @@ where
 
         let stack = &mut self.0;
 
-        // Box the largest futures to reduce stack frame size
-        let net_task = Box::pin(stack.run_oper_net(
+        let mut net_task = pin!(stack.run_oper_net(
             &net_stack,
             &netif,
             &mut mdns,
@@ -470,14 +466,14 @@ where
         let handler = self
             .0
             .root_handler(&(), &netif, &net_ctl_s, &false, &self.1);
-        let handler_task = Box::pin(self.0.run_handler((&self.1, handler)));
+        let mut handler_task = pin!(self.0.run_handler((&self.1, handler)));
 
         let mut user_task = pin!(self.2.run(&net_stack, &netif));
 
         select4(
-            net_task,
+            &mut net_task,
             &mut mgr_task,
-            handler_task,
+            &mut handler_task,
             &mut user_task,
         )
         .coalesce()
@@ -511,17 +507,17 @@ where
 
         let stack = &mut self.0;
 
-        // Box the largest futures to reduce stack frame size
-        let net_task = Box::pin(stack.run_net_coex(&net_stack, &netif, &net_ctl, &mut mdns, &mut gatt));
+        let mut net_task =
+            pin!(stack.run_net_coex(&net_stack, &netif, &net_ctl, &mut mdns, &mut gatt));
 
         let net_ctl_s = NetCtlWithStatusImpl::new(&self.0.network.net_state, &net_ctl);
 
         let handler = self.0.root_handler(&(), &netif, &net_ctl_s, &true, &self.1);
-        let handler_task = Box::pin(self.0.run_handler((&self.1, handler)));
+        let mut handler_task = pin!(self.0.run_handler((&self.1, handler)));
 
         let mut user_task = pin!(self.2.run(&net_stack, &netif));
 
-        select3(net_task, handler_task, &mut user_task)
+        select3(&mut net_task, &mut handler_task, &mut user_task)
             .coalesce()
             .await
     }
