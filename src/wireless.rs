@@ -4,8 +4,6 @@ use core::pin::pin;
 use embassy_futures::select::{select, select3};
 use embassy_sync::blocking_mutex::raw::RawMutex;
 
-use crate::bump_alloc::BumpAllocator;
-
 use rs_matter::dm::clusters::gen_diag::NetifDiag;
 use rs_matter::dm::clusters::net_comm::NetCtl;
 use rs_matter::dm::clusters::wifi_diag::WirelessDiag;

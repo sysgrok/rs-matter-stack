@@ -1,7 +1,10 @@
+use core::mem::MaybeUninit;
 use core::pin::pin;
 
 use embassy_futures::select::{select, select3, select4};
 use embassy_sync::blocking_mutex::raw::RawMutex;
+
+use crate::bump_alloc::BumpAllocator;
 
 use rs_matter::dm::clusters::gen_comm::CommPolicy;
 use rs_matter::dm::clusters::gen_diag::GenDiag;
@@ -24,7 +27,7 @@ use crate::mdns::Mdns;
 use crate::nal::NetStack;
 use crate::network::Embedding;
 use crate::persist::{KvBlobStore, SharedKvBlobStore};
-use crate::wireless::{GattTask, MatterStackWirelessTask};
+use crate::wireless::{GattTask, MatterStackWirelessTask, MatterStackWirelessTaskWithMemory};
 use crate::UserTask;
 
 use super::{Gatt, PreexistingWireless, WirelessMatterStack};
@@ -147,6 +150,43 @@ where
         select(&mut net_task, &mut persist_task).coalesce().await
     }
 
+    /// Run the Matter stack for a Thread network with bump allocation.
+    /// Uses the provided memory buffer for allocations instead of heap.
+    ///
+    /// Parameters:
+    /// - `thread` - a user-provided Thread implementation
+    /// - `store` - a user-provided persistent storage implementation
+    /// - `handler` - a user-provided DM handler implementation
+    /// - `user` - a user-provided future that will be polled only when the netif interface is up
+    /// - `memory` - a memory buffer for internal allocations (recommended size: 16KB+)
+    pub async fn run_with_memory<W, S, H, U>(
+        &'static self,
+        thread: W,
+        store: &SharedKvBlobStore<'_, S>,
+        handler: H,
+        user: U,
+        memory: &mut [MaybeUninit<u8>],
+    ) -> Result<(), Error>
+    where
+        W: Thread + Gatt,
+        S: KvBlobStore,
+        H: AsyncHandler + AsyncMetadata,
+        U: UserTask,
+    {
+        info!("Matter Stack memory: {}B", core::mem::size_of_val(self));
+
+        let persist = self.create_persist(store);
+
+        persist.load().await?;
+
+        self.matter().reset_transport()?;
+
+        let mut net_task = pin!(self.run_thread_with_memory(thread, handler, user, memory));
+        let mut persist_task = pin!(self.run_psm(&persist));
+
+        select(&mut net_task, &mut persist_task).coalesce().await
+    }
+
     async fn run_thread_coex<W, H, U>(
         &'static self,
         mut thread: W,
@@ -196,6 +236,45 @@ where
             Thread::run(
                 &mut thread,
                 MatterStackWirelessTask(self, &handler, &mut user),
+            )
+            .await?;
+        }
+    }
+
+    async fn run_thread_with_memory<W, H, U>(
+        &'static self,
+        mut thread: W,
+        handler: H,
+        mut user: U,
+        memory: &mut [MaybeUninit<u8>],
+    ) -> Result<(), Error>
+    where
+        W: Thread + Gatt,
+        H: AsyncHandler + AsyncMetadata,
+        U: UserTask,
+    {
+        loop {
+            let commissioned = self.is_commissioned().await?;
+
+            if !commissioned {
+                self.matter()
+                    .enable_basic_commissioning(DiscoveryCapabilities::BLE, 0)
+                    .await?; // TODO
+
+                Gatt::run(
+                    &mut thread,
+                    MatterStackWirelessTaskWithMemory(self, &handler, &mut user, memory),
+                )
+                .await?;
+            }
+
+            if commissioned {
+                self.matter().disable_commissioning()?;
+            }
+
+            Thread::run(
+                &mut thread,
+                MatterStackWirelessTaskWithMemory(self, &handler, &mut user, memory),
             )
             .await?;
         }
@@ -518,6 +597,181 @@ where
         let mut user_task = pin!(self.2.run(&net_stack, &netif));
 
         select3(&mut net_task, &mut handler_task, &mut user_task)
+            .coalesce()
+            .await
+    }
+}
+
+impl<M, E, H, X> GattTask
+    for MatterStackWirelessTaskWithMemory<'static, M, wireless::Thread, E, H, X>
+where
+    M: RawMutex + Send + Sync + 'static,
+    E: Embedding + 'static,
+    H: AsyncMetadata + AsyncHandler,
+{
+    async fn run<P>(&mut self, peripheral: P) -> Result<(), Error>
+    where
+        P: GattPeripheral,
+    {
+        let net_ctl = NetCtlWithStatusImpl::new(
+            &self.0.network.net_state,
+            NoopWirelessNetCtl::new(NetworkType::Thread),
+        );
+
+        // Create bump allocator from provided memory
+        let mut allocator = BumpAllocator::new(self.3);
+
+        // Use bump allocator instead of stack allocation for largest futures
+        let btp_task = allocator
+            .alloc_pin(self.0.run_btp(peripheral))
+            .map_err(|_| {
+                rs_matter::error::Error::new(rs_matter::error::ErrorCode::NoMemory)
+            })?;
+
+        let handler = self.0.root_handler(&(), &(), &net_ctl, &false, &self.1);
+        let handler_task = allocator
+            .alloc_pin(self.0.run_handler((&self.1, handler)))
+            .map_err(|_| {
+                rs_matter::error::Error::new(rs_matter::error::ErrorCode::NoMemory)
+            })?;
+
+        info!(
+            "Bump allocator usage: {}/{} bytes",
+            allocator.used(),
+            allocator.capacity()
+        );
+
+        select(btp_task, handler_task).coalesce().await
+    }
+}
+
+impl<M, E, H, X> ThreadTask
+    for MatterStackWirelessTaskWithMemory<'static, M, wireless::Thread, E, H, X>
+where
+    M: RawMutex + Send + Sync + 'static,
+    E: Embedding + 'static,
+    H: AsyncMetadata + AsyncHandler,
+    X: UserTask,
+{
+    async fn run<S, N, C, D>(
+        &mut self,
+        net_stack: S,
+        netif: N,
+        net_ctl: C,
+        mut mdns: D,
+    ) -> Result<(), Error>
+    where
+        S: NetStack,
+        N: NetifDiag + NetChangeNotif,
+        C: NetCtl + ThreadDiag + NetChangeNotif,
+        D: Mdns,
+    {
+        info!("Thread driver started with bump allocator");
+
+        let mut buf = self.0.network.creds_buf.lock().await;
+
+        let mut mgr = WirelessMgr::new(&self.0.network.networks, &net_ctl, &mut buf);
+
+        let stack = &mut self.0;
+
+        // Create bump allocator from provided memory
+        let mut allocator = BumpAllocator::new(self.3);
+
+        // Use bump allocator instead of stack allocation for largest futures
+        let net_task = allocator
+            .alloc_pin(stack.run_oper_net(
+                &net_stack,
+                &netif,
+                &mut mdns,
+                core::future::pending(),
+                Option::<(NoNetwork, NoNetwork)>::None,
+            ))
+            .map_err(|_| {
+                rs_matter::error::Error::new(rs_matter::error::ErrorCode::NoMemory)
+            })?;
+
+        let mut mgr_task = pin!(mgr.run());
+
+        let net_ctl_s = NetCtlWithStatusImpl::new(&self.0.network.net_state, &net_ctl);
+
+        let handler = self
+            .0
+            .root_handler(&(), &netif, &net_ctl_s, &false, &self.1);
+        let handler_task = allocator
+            .alloc_pin(self.0.run_handler((&self.1, handler)))
+            .map_err(|_| {
+                rs_matter::error::Error::new(rs_matter::error::ErrorCode::NoMemory)
+            })?;
+
+        let mut user_task = pin!(self.2.run(&net_stack, &netif));
+
+        info!(
+            "Bump allocator usage: {}/{} bytes",
+            allocator.used(),
+            allocator.capacity()
+        );
+
+        select4(net_task, &mut mgr_task, handler_task, &mut user_task)
+            .coalesce()
+            .await
+    }
+}
+
+impl<M, E, H, X> ThreadCoexTask
+    for MatterStackWirelessTaskWithMemory<'static, M, wireless::Thread, E, H, X>
+where
+    M: RawMutex + Send + Sync + 'static,
+    E: Embedding + 'static,
+    H: AsyncMetadata + AsyncHandler,
+    X: UserTask,
+{
+    async fn run<S, N, C, D, G>(
+        &mut self,
+        net_stack: S,
+        netif: N,
+        net_ctl: C,
+        mut mdns: D,
+        mut gatt: G,
+    ) -> Result<(), Error>
+    where
+        S: NetStack,
+        N: NetifDiag + NetChangeNotif,
+        C: NetCtl + ThreadDiag + NetChangeNotif,
+        D: Mdns,
+        G: GattPeripheral,
+    {
+        info!("Thread and BLE drivers started with bump allocator");
+
+        let stack = &mut self.0;
+
+        // Create bump allocator from provided memory
+        let mut allocator = BumpAllocator::new(self.3);
+
+        // Use bump allocator instead of stack allocation for largest futures
+        let net_task = allocator
+            .alloc_pin(stack.run_net_coex(&net_stack, &netif, &net_ctl, &mut mdns, &mut gatt))
+            .map_err(|_| {
+                rs_matter::error::Error::new(rs_matter::error::ErrorCode::NoMemory)
+            })?;
+
+        let net_ctl_s = NetCtlWithStatusImpl::new(&self.0.network.net_state, &net_ctl);
+
+        let handler = self.0.root_handler(&(), &netif, &net_ctl_s, &true, &self.1);
+        let handler_task = allocator
+            .alloc_pin(self.0.run_handler((&self.1, handler)))
+            .map_err(|_| {
+                rs_matter::error::Error::new(rs_matter::error::ErrorCode::NoMemory)
+            })?;
+
+        let mut user_task = pin!(self.2.run(&net_stack, &netif));
+
+        info!(
+            "Bump allocator usage: {}/{} bytes",
+            allocator.used(),
+            allocator.capacity()
+        );
+
+        select3(net_task, handler_task, &mut user_task)
             .coalesce()
             .await
     }

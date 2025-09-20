@@ -399,14 +399,14 @@ where
                 Option::<(NoNetwork, NoNetwork)>::None,
             ))
             .map_err(|_| {
-                rs_matter::error::Error::new(rs_matter::error::ErrorCode::NoMemory, false)
+                rs_matter::error::Error::new(rs_matter::error::ErrorCode::NoMemory)
             })?;
 
         let handler = self.0.root_handler(&(), &true, &netif, &self.1);
         let handler_task = allocator
             .alloc_pin(self.0.run_handler((&self.1, handler)))
             .map_err(|_| {
-                rs_matter::error::Error::new(rs_matter::error::ErrorCode::NoMemory, false)
+                rs_matter::error::Error::new(rs_matter::error::ErrorCode::NoMemory)
             })?;
 
         let mut user_task = pin!(self.2.run(&net_stack, &netif));
