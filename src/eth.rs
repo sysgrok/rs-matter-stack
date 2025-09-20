@@ -1,6 +1,6 @@
-use core::pin::pin;
+use core::future::Future;
 
-use embassy_futures::select::{select, select3};
+use embassy_futures::select::{select, select4};
 
 use rs_matter::dm::clusters::gen_comm::CommPolicy;
 use rs_matter::dm::clusters::gen_diag::{GenDiag, NetifDiag};
@@ -19,7 +19,7 @@ use crate::nal::NetStack;
 use crate::network::{Embedding, Network};
 use crate::persist::{KvBlobStore, SharedKvBlobStore};
 use crate::private::Sealed;
-use crate::{MatterStack, UserTask};
+use crate::{pin_alloc, MatterStack, UserTask};
 
 /// An implementation of the `Network` trait for Ethernet.
 ///
@@ -60,7 +60,7 @@ where
     }
 }
 
-pub type EthMatterStack<'a, E = ()> = MatterStack<'a, Eth<E>>;
+pub type EthMatterStack<'a, const B: usize, E = ()> = MatterStack<'a, B, Eth<E>>;
 
 /// A trait representing a task that needs access to the operational Ethernet interface
 /// (Network stack and Netif) to perform its work.
@@ -77,13 +77,18 @@ impl<T> EthernetTask for &mut T
 where
     T: EthernetTask,
 {
-    async fn run<S, N, M>(&mut self, net_stack: S, netif: N, mdns: M) -> Result<(), Error>
+    fn run<S, N, M>(
+        &mut self,
+        net_stack: S,
+        netif: N,
+        mdns: M,
+    ) -> impl Future<Output = Result<(), Error>>
     where
         S: NetStack,
         N: NetifDiag + NetChangeNotif,
         M: Mdns,
     {
-        (*self).run(net_stack, netif, mdns).await
+        (*self).run(net_stack, netif, mdns)
     }
 }
 
@@ -99,11 +104,11 @@ impl<T> Ethernet for &mut T
 where
     T: Ethernet,
 {
-    async fn run<A>(&mut self, task: A) -> Result<(), Error>
+    fn run<A>(&mut self, task: A) -> impl Future<Output = Result<(), Error>>
     where
         A: EthernetTask,
     {
-        (*self).run(task).await
+        (*self).run(task)
     }
 }
 
@@ -137,7 +142,7 @@ where
 }
 
 /// A specialization of the `MatterStack` for Ethernet.
-impl<E> MatterStack<'_, Eth<E>>
+impl<const B: usize, E> MatterStack<'_, B, Eth<E>>
 where
     E: Embedding + 'static,
 {
@@ -181,22 +186,22 @@ where
     /// - `persist` - a user-provided `Persist` implementation
     /// - `handler` - a user-provided DM handler implementation
     /// - `user` - a user-provided future that will be polled only when the netif interface is up
-    pub async fn run_preex<U, N, M, S, H, X>(
-        &self,
+    pub fn run_preex<'t, U, N, M, S, H, X>(
+        &'t self,
         net_stack: U,
         netif: N,
         mdns: M,
-        store: &SharedKvBlobStore<'_, S>,
+        store: &'t SharedKvBlobStore<'_, S>,
         handler: H,
         user: X,
-    ) -> Result<(), Error>
+    ) -> impl Future<Output = Result<(), Error>> + 't
     where
-        U: NetStack,
-        N: NetifDiag + NetChangeNotif,
-        M: Mdns,
-        S: KvBlobStore,
-        H: AsyncHandler + AsyncMetadata,
-        X: UserTask,
+        U: NetStack + 't,
+        N: NetifDiag + NetChangeNotif + 't,
+        M: Mdns + 't,
+        S: KvBlobStore + 't,
+        H: AsyncHandler + AsyncMetadata + 't,
+        X: UserTask + 't,
     {
         self.run(
             PreexistingEthernet::new(net_stack, netif, mdns),
@@ -204,7 +209,6 @@ where
             handler,
             user,
         )
-        .await
     }
 
     /// Run the Matter stack for an Ethernet network.
@@ -216,7 +220,7 @@ where
     /// - `user` - a user-provided future that will be polled only when the netif interface is up
     pub async fn run<N, S, H, X>(
         &self,
-        ethernet: N,
+        mut ethernet: N,
         store: &SharedKvBlobStore<'_, S>,
         handler: H,
         user: X,
@@ -227,7 +231,15 @@ where
         H: AsyncHandler + AsyncMetadata,
         X: UserTask,
     {
-        info!("Matter Stack memory: {}B", core::mem::size_of_val(self));
+        let _lock = self.run_lock.lock().await;
+
+        info!("Matter Stack memory: {}b", core::mem::size_of_val(self));
+
+        // Since this is the last code executed in the method, resetting the allocator should be safe
+        // because all boxes returned by it should be dropped by then
+        let _defer = scopeguard::guard((), |_| unsafe {
+            self.bump.reset();
+        });
 
         let persist = self.create_persist(store);
 
@@ -241,29 +253,34 @@ where
                 .await?; // TODO
         }
 
-        let mut net_task = pin!(self.run_ethernet(ethernet, handler, user));
-        let mut persist_task = pin!(self.run_psm(&persist));
+        let mut net_task = pin_alloc!(self.bump, self.run_ethernet(&mut ethernet, handler, user));
+        let mut persist_task = pin_alloc!(self.bump, self.run_psm(&persist));
 
         select(&mut net_task, &mut persist_task).coalesce().await
     }
 
-    async fn run_ethernet<N, H, X>(&self, mut ethernet: N, handler: H, user: X) -> Result<(), Error>
+    fn run_ethernet<'t, N, H, X>(
+        &'t self,
+        ethernet: &'t mut N,
+        handler: H,
+        user: X,
+    ) -> impl Future<Output = Result<(), Error>> + 't
     where
-        N: Ethernet,
-        H: AsyncHandler + AsyncMetadata,
-        X: UserTask,
+        N: Ethernet + 't,
+        H: AsyncHandler + AsyncMetadata + 't,
+        X: UserTask + 't,
     {
-        Ethernet::run(&mut ethernet, MatterStackEthernetTask(self, handler, user)).await
+        Ethernet::run(ethernet, MatterStackEthernetTask(self, handler, user))
     }
 }
 
-struct MatterStackEthernetTask<'a, E, H, X>(&'a MatterStack<'a, Eth<E>>, H, X)
+struct MatterStackEthernetTask<'a, const B: usize, E, H, X>(&'a MatterStack<'a, B, Eth<E>>, H, X)
 where
     E: Embedding + 'static,
     H: AsyncMetadata + AsyncHandler,
     X: UserTask;
 
-impl<E, H, X> EthernetTask for MatterStackEthernetTask<'_, E, H, X>
+impl<const B: usize, E, H, X> EthernetTask for MatterStackEthernetTask<'_, B, E, H, X>
 where
     E: Embedding + 'static,
     H: AsyncMetadata + AsyncHandler,
@@ -277,21 +294,36 @@ where
     {
         info!("Ethernet driver started");
 
-        let mut net_task = pin!(self.0.run_oper_net(
-            &net_stack,
-            &netif,
-            &mut mdns,
-            core::future::pending(),
-            Option::<(NoNetwork, NoNetwork)>::None,
-        ));
-
         let handler = self.0.root_handler(&(), &true, &netif, &self.1);
-        let mut handler_task = pin!(self.0.run_handler((&self.1, handler)));
 
-        let mut user_task = pin!(self.2.run(&net_stack, &netif));
+        let mut net_task = pin_alloc!(
+            self.0.bump,
+            self.0.run_oper_net(
+                &net_stack,
+                core::future::pending(),
+                Option::<(NoNetwork, NoNetwork)>::None,
+            )
+        );
 
-        select3(&mut net_task, &mut handler_task, &mut user_task)
-            .coalesce()
-            .await
+        let mut mdns_task = pin_alloc!(
+            self.0.bump,
+            self.0.run_oper_netif_mdns(&net_stack, &netif, &mut mdns)
+        );
+
+        let mut handler_task = pin_alloc!(
+            self.0.bump,
+            self.0.run_handler_with_bump((&self.1, handler))
+        );
+
+        let mut user_task = pin_alloc!(self.0.bump, self.2.run(&net_stack, &netif));
+
+        select4(
+            &mut net_task,
+            &mut mdns_task,
+            &mut handler_task,
+            &mut user_task,
+        )
+        .coalesce()
+        .await
     }
 }

@@ -14,10 +14,18 @@ rust-version = "1.77"
 
 [patch.crates-io]
 rs-matter = { git = "https://github.com/project-chip/rs-matter" }
+#rs-matter = { git = "https://github.com/sysgrok/rs-matter", branch = "next" }
 #rs-matter = { path = "../rs-matter/rs-matter" }
 #edge-nal = { git = "https://github.com/sysgrok/edge-net" }
 #edge-nal-std = { git = "https://github.com/sysgrok/edge-net" }
 #edge-mdns = { git = "https://github.com/sysgrok/edge-net" }
+
+[profile.release]
+opt-level = "s"
+
+[profile.dev]
+debug = true
+opt-level = "z"
 
 [features]
 default = []
