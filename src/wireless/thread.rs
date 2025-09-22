@@ -1,3 +1,4 @@
+use core::future::Future;
 use core::pin::pin;
 
 use embassy_futures::select::{select, select3, select4};
@@ -25,14 +26,15 @@ use crate::nal::NetStack;
 use crate::network::Embedding;
 use crate::persist::{KvBlobStore, SharedKvBlobStore};
 use crate::wireless::{GattTask, MatterStackWirelessTask};
-use crate::UserTask;
+use crate::{pin_alloc, UserTask};
 
 use super::{Gatt, PreexistingWireless, WirelessMatterStack};
 
 /// A type alias for a Matter stack running over Thread (and BLE, during commissioning).
-pub type ThreadMatterStack<'a, M, E = ()> = WirelessMatterStack<'a, M, wireless::Thread, E>;
+pub type ThreadMatterStack<'a, const B: usize, M, E = ()> =
+    WirelessMatterStack<'a, B, M, wireless::Thread, E>;
 
-impl<M, E> WirelessMatterStack<'_, M, wireless::Thread, E>
+impl<const B: usize, M, E> WirelessMatterStack<'_, B, M, wireless::Thread, E>
 where
     M: RawMutex + Send + Sync + 'static,
     E: Embedding + 'static,
@@ -88,7 +90,7 @@ where
     /// - `user` - a user-provided future that will be polled only when the netif interface is up
     pub async fn run_coex<W, S, H, U>(
         &'static self,
-        thread: W,
+        mut thread: W,
         store: &SharedKvBlobStore<'_, S>,
         handler: H,
         user: U,
@@ -99,7 +101,15 @@ where
         H: AsyncHandler + AsyncMetadata,
         U: UserTask,
     {
-        info!("Matter Stack memory: {}B", core::mem::size_of_val(self));
+        let _lock = self.run_lock.lock().await;
+
+        info!("Matter Stack memory: {}b", core::mem::size_of_val(self));
+
+        // Since this is the last code executed in the method, resetting the allocator should be safe
+        // because all boxes returned by it should be dropped by then
+        let _defer = scopeguard::guard((), |_| unsafe {
+            self.bump.reset();
+        });
 
         let persist = self.create_persist(store);
 
@@ -107,8 +117,8 @@ where
 
         self.matter().reset_transport()?;
 
-        let mut net_task = pin!(self.run_thread_coex(thread, handler, user));
-        let mut persist_task = pin!(self.run_psm(&persist));
+        let mut net_task = pin_alloc!(self.bump, self.run_thread_coex(&mut thread, handler, user));
+        let mut persist_task = pin_alloc!(self.bump, self.run_psm(&persist));
 
         select(&mut net_task, &mut persist_task).coalesce().await
     }
@@ -133,7 +143,15 @@ where
         H: AsyncHandler + AsyncMetadata,
         U: UserTask,
     {
-        info!("Matter Stack memory: {}B", core::mem::size_of_val(self));
+        let _lock = self.run_lock.lock().await;
+
+        info!("Matter Stack memory: {}b", core::mem::size_of_val(self));
+
+        // Since this is the last code executed in the method, resetting the allocator should be safe
+        // because all boxes returned by it should be dropped by then
+        let _defer = scopeguard::guard((), |_| unsafe {
+            self.bump.reset();
+        });
 
         let persist = self.create_persist(store);
 
@@ -141,26 +159,24 @@ where
 
         self.matter().reset_transport()?;
 
-        let mut net_task = pin!(self.run_thread(thread, handler, user));
-        let mut persist_task = pin!(self.run_psm(&persist));
+        let mut net_task = pin_alloc!(self.bump, self.run_thread(thread, handler, user));
+        let mut persist_task = pin_alloc!(self.bump, self.run_psm(&persist));
 
         select(&mut net_task, &mut persist_task).coalesce().await
     }
 
-    async fn run_thread_coex<W, H, U>(
+    fn run_thread_coex<'t, W, H, U>(
         &'static self,
-        mut thread: W,
+        thread: &'t mut W,
         handler: H,
         user: U,
-    ) -> Result<(), Error>
+    ) -> impl Future<Output = Result<(), Error>> + 't
     where
-        W: ThreadCoex,
-        H: AsyncHandler + AsyncMetadata,
-        U: UserTask,
+        W: ThreadCoex + 't,
+        H: AsyncHandler + AsyncMetadata + 't,
+        U: UserTask + 't,
     {
-        thread
-            .run(MatterStackWirelessTask(self, handler, user))
-            .await
+        thread.run(MatterStackWirelessTask(self, handler, user))
     }
 
     async fn run_thread<W, H, U>(
@@ -253,20 +269,20 @@ impl<T> ThreadTask for &mut T
 where
     T: ThreadTask,
 {
-    async fn run<S, N, C, M>(
+    fn run<S, N, C, M>(
         &mut self,
         net_stack: S,
         netif: N,
         net_ctl: C,
         mdns: M,
-    ) -> Result<(), Error>
+    ) -> impl Future<Output = Result<(), Error>>
     where
         S: NetStack,
         N: NetifDiag + NetChangeNotif,
         C: NetCtl + ThreadDiag + NetChangeNotif,
         M: Mdns,
     {
-        T::run(*self, net_stack, netif, net_ctl, mdns).await
+        T::run(*self, net_stack, netif, net_ctl, mdns)
     }
 }
 
@@ -283,11 +299,11 @@ impl<T> Thread for &mut T
 where
     T: Thread,
 {
-    async fn run<A>(&mut self, task: A) -> Result<(), Error>
+    fn run<A>(&mut self, task: A) -> impl Future<Output = Result<(), Error>>
     where
         A: ThreadTask,
     {
-        T::run(self, task).await
+        T::run(self, task)
     }
 }
 
@@ -317,14 +333,14 @@ impl<T> ThreadCoexTask for &mut T
 where
     T: ThreadCoexTask,
 {
-    async fn run<S, N, C, M, G>(
+    fn run<S, N, C, M, G>(
         &mut self,
         net_stack: S,
         netif: N,
         net_ctl: C,
         mdns: M,
         gatt: G,
-    ) -> Result<(), Error>
+    ) -> impl Future<Output = Result<(), Error>>
     where
         S: NetStack,
         N: NetifDiag + NetChangeNotif,
@@ -332,7 +348,7 @@ where
         M: Mdns,
         G: GattPeripheral,
     {
-        T::run(*self, net_stack, netif, net_ctl, mdns, gatt).await
+        T::run(*self, net_stack, netif, net_ctl, mdns, gatt)
     }
 }
 
@@ -353,11 +369,11 @@ impl<T> ThreadCoex for &mut T
 where
     T: ThreadCoex,
 {
-    async fn run<A>(&mut self, task: A) -> Result<(), Error>
+    fn run<A>(&mut self, task: A) -> impl Future<Output = Result<(), Error>>
     where
         A: ThreadCoexTask,
     {
-        T::run(self, task).await
+        T::run(self, task)
     }
 }
 
@@ -400,7 +416,8 @@ where
     }
 }
 
-impl<M, E, H, X> GattTask for MatterStackWirelessTask<'static, M, wireless::Thread, E, H, X>
+impl<const B: usize, M, E, H, X> GattTask
+    for MatterStackWirelessTask<'static, B, M, wireless::Thread, E, H, X>
 where
     M: RawMutex + Send + Sync + 'static,
     E: Embedding + 'static,
@@ -424,7 +441,8 @@ where
     }
 }
 
-impl<M, E, H, X> ThreadTask for MatterStackWirelessTask<'static, M, wireless::Thread, E, H, X>
+impl<const B: usize, M, E, H, X> ThreadTask
+    for MatterStackWirelessTask<'static, B, M, wireless::Thread, E, H, X>
 where
     M: RawMutex + Send + Sync + 'static,
     E: Embedding + 'static,
@@ -454,11 +472,12 @@ where
 
         let mut net_task = pin!(stack.run_oper_net(
             &net_stack,
-            &netif,
-            &mut mdns,
             core::future::pending(),
             Option::<(NoNetwork, NoNetwork)>::None
         ));
+
+        let mut mdns_task = pin!(stack.run_oper_netif_mdns(&net_stack, &netif, &mut mdns));
+
         let mut mgr_task = pin!(mgr.run());
 
         let net_ctl_s = NetCtlWithStatusImpl::new(&self.0.network.net_state, &net_ctl);
@@ -466,22 +485,24 @@ where
         let handler = self
             .0
             .root_handler(&(), &netif, &net_ctl_s, &false, &self.1);
+
         let mut handler_task = pin!(self.0.run_handler((&self.1, handler)));
 
         let mut user_task = pin!(self.2.run(&net_stack, &netif));
 
         select4(
             &mut net_task,
+            &mut mdns_task,
             &mut mgr_task,
-            &mut handler_task,
-            &mut user_task,
+            select(&mut handler_task, &mut user_task).coalesce(),
         )
         .coalesce()
         .await
     }
 }
 
-impl<M, E, H, X> ThreadCoexTask for MatterStackWirelessTask<'static, M, wireless::Thread, E, H, X>
+impl<const B: usize, M, E, H, X> ThreadCoexTask
+    for MatterStackWirelessTask<'static, B, M, wireless::Thread, E, H, X>
 where
     M: RawMutex + Send + Sync + 'static,
     E: Embedding + 'static,
@@ -506,16 +527,19 @@ where
         info!("Thread and BLE drivers started");
 
         let stack = &mut self.0;
+        let bump = &stack.bump;
 
-        let mut net_task =
-            pin!(stack.run_net_coex(&net_stack, &netif, &net_ctl, &mut mdns, &mut gatt));
+        let mut net_task = pin_alloc!(
+            bump,
+            stack.run_net_coex(&net_stack, &netif, &net_ctl, &mut mdns, &mut gatt)
+        );
 
         let net_ctl_s = NetCtlWithStatusImpl::new(&self.0.network.net_state, &net_ctl);
 
         let handler = self.0.root_handler(&(), &netif, &net_ctl_s, &true, &self.1);
-        let mut handler_task = pin!(self.0.run_handler((&self.1, handler)));
+        let mut handler_task = pin_alloc!(bump, self.0.run_handler_with_bump((&self.1, handler)));
 
-        let mut user_task = pin!(self.2.run(&net_stack, &netif));
+        let mut user_task = pin_alloc!(bump, self.2.run(&net_stack, &netif));
 
         select3(&mut net_task, &mut handler_task, &mut user_task)
             .coalesce()

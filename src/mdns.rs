@@ -1,3 +1,5 @@
+use core::fmt::Debug;
+use core::future::Future;
 use core::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
 
 use edge_nal::{UdpBind, UdpSplit};
@@ -30,7 +32,7 @@ impl<T> Mdns for &mut T
 where
     T: Mdns,
 {
-    async fn run<U>(
+    fn run<U>(
         &mut self,
         matter: &Matter<'_>,
         udp: U,
@@ -38,11 +40,11 @@ where
         ipv4: Ipv4Addr,
         ipv6: Ipv6Addr,
         interface: u32,
-    ) -> Result<(), Error>
+    ) -> impl Future<Output = Result<(), Error>>
     where
         U: UdpBind,
     {
-        (*self).run(matter, udp, mac, ipv4, ipv6, interface).await
+        (*self).run(matter, udp, mac, ipv4, ipv6, interface)
     }
 }
 
@@ -73,7 +75,7 @@ impl BuiltinMdns {
     {
         use core::fmt::Write as _;
 
-        use {edge_nal::MulticastV4, edge_nal::MulticastV6};
+        use edge_nal::{MulticastV4, MulticastV6};
 
         use rs_matter::transport::network::mdns::builtin::Host;
         use rs_matter::transport::network::mdns::{
@@ -85,19 +87,20 @@ impl BuiltinMdns {
                 Ipv6Addr::UNSPECIFIED,
                 MDNS_PORT,
                 0,
-                interface,
+                0,
             )))
             .await
-            .map_err(|_| ErrorCode::StdIoError)?;
+            .map_err(map_err)?;
 
         socket
             .join_v4(MDNS_IPV4_BROADCAST_ADDR, ipv4)
             .await
-            .map_err(|_| ErrorCode::StdIoError)?;
+            .map_err(map_err)?;
+
         socket
             .join_v6(MDNS_IPV6_BROADCAST_ADDR, interface)
             .await
-            .map_err(|_| ErrorCode::StdIoError)?;
+            .map_err(map_err)?;
 
         let (recv, send) = socket.split();
 
@@ -150,7 +153,7 @@ impl BuiltinMdns {
 }
 
 impl Mdns for BuiltinMdns {
-    async fn run<U>(
+    fn run<U>(
         &mut self,
         matter: &Matter<'_>,
         udp: U,
@@ -158,12 +161,17 @@ impl Mdns for BuiltinMdns {
         ipv4: Ipv4Addr,
         ipv6: Ipv6Addr,
         interface: u32,
-    ) -> Result<(), Error>
+    ) -> impl Future<Output = Result<(), Error>>
     where
         U: UdpBind,
     {
-        Self::run(self, matter, udp, mac, ipv4, ipv6, interface).await
+        Self::run(self, matter, udp, mac, ipv4, ipv6, interface)
     }
+}
+
+fn map_err<E: Debug>(e: E) -> Error {
+    warn!("mDNS network error: {:?}", debug2format!(e));
+    ErrorCode::StdIoError.into() // TODO
 }
 
 /// An mDNS responder for Matter using the Avahi zbus mDNS implementation.
@@ -188,7 +196,7 @@ impl<'a> AvahiMdns<'a> {
 
 #[cfg(feature = "zbus")]
 impl Mdns for AvahiMdns<'_> {
-    async fn run<U>(
+    fn run<U>(
         &mut self,
         matter: &Matter<'_>,
         _udp: U,
@@ -196,11 +204,11 @@ impl Mdns for AvahiMdns<'_> {
         _ipv4: Ipv4Addr,
         _ipv6: Ipv6Addr,
         _interface: u32,
-    ) -> Result<(), Error>
+    ) -> impl Future<Output = Result<(), Error>>
     where
         U: UdpBind,
     {
-        Self::run(self, matter).await
+        Self::run(self, matter)
     }
 }
 
@@ -226,7 +234,7 @@ impl<'a> ResolveMdns<'a> {
 
 #[cfg(feature = "zbus")]
 impl Mdns for ResolveMdns<'_> {
-    async fn run<U>(
+    fn run<U>(
         &mut self,
         matter: &Matter<'_>,
         _udp: U,
@@ -234,11 +242,11 @@ impl Mdns for ResolveMdns<'_> {
         _ipv4: Ipv4Addr,
         _ipv6: Ipv6Addr,
         _interface: u32,
-    ) -> Result<(), Error>
+    ) -> impl Future<Output = Result<(), Error>>
     where
         U: UdpBind,
     {
-        Self::run(self, matter).await
+        Self::run(self, matter)
     }
 }
 
@@ -257,7 +265,7 @@ impl ZeroconfMdns {
 
 #[cfg(feature = "zeroconf")]
 impl Mdns for ZeroconfMdns {
-    async fn run<U>(
+    fn run<U>(
         &mut self,
         matter: &Matter<'_>,
         _udp: U,
@@ -265,11 +273,11 @@ impl Mdns for ZeroconfMdns {
         _ipv4: Ipv4Addr,
         _ipv6: Ipv6Addr,
         _interface: u32,
-    ) -> Result<(), Error>
+    ) -> impl Future<Output = Result<(), Error>>
     where
         U: UdpBind,
     {
-        Self::run(self, matter).await
+        Self::run(self, matter)
     }
 }
 

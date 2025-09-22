@@ -1,3 +1,5 @@
+use core::future::Future;
+
 use rs_matter::error::Error;
 use rs_matter::transport::network::btp::GattPeripheral;
 
@@ -16,11 +18,11 @@ impl<T> GattTask for &mut T
 where
     T: GattTask,
 {
-    async fn run<P>(&mut self, peripheral: P) -> Result<(), Error>
+    fn run<P>(&mut self, peripheral: P) -> impl Future<Output = Result<(), Error>>
     where
         P: GattPeripheral,
     {
-        T::run(*self, peripheral).await
+        T::run(*self, peripheral)
     }
 }
 
@@ -38,11 +40,11 @@ impl<T> Gatt for &mut T
 where
     T: Gatt,
 {
-    async fn run<A>(&mut self, task: A) -> Result<(), Error>
+    fn run<A>(&mut self, task: A) -> impl Future<Output = Result<(), Error>>
     where
         A: GattTask,
     {
-        T::run(self, task).await
+        T::run(self, task)
     }
 }
 

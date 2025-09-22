@@ -13,7 +13,6 @@ use rs_matter::dm::networks::NetChangeNotif;
 use rs_matter::error::Error;
 use rs_matter::pairing::DiscoveryCapabilities;
 use rs_matter::transport::network::btp::{Btp, BtpContext, GattPeripheral};
-use rs_matter::transport::network::NoNetwork;
 use rs_matter::utils::cell::RefCell;
 use rs_matter::utils::init::{init, zeroed, Init};
 use rs_matter::utils::select::Coalesce;
@@ -23,7 +22,7 @@ use crate::mdns::Mdns;
 use crate::nal::NetStack;
 use crate::network::{Embedding, Network};
 use crate::private::Sealed;
-use crate::MatterStack;
+use crate::{pin_alloc, MatterStack};
 
 pub use gatt::*;
 pub use thread::*;
@@ -36,7 +35,8 @@ mod wifi;
 const MAX_WIRELESS_NETWORKS: usize = 2;
 
 /// A type alias for a Matter stack running over either Wifi or Thread (and BLE, during commissioning).
-pub type WirelessMatterStack<'a, M, T, E = ()> = MatterStack<'a, WirelessBle<M, T, E>>;
+pub type WirelessMatterStack<'a, const B: usize, M, T, E = ()> =
+    MatterStack<'a, B, WirelessBle<M, T, E>>;
 
 /// An implementation of the `Network` trait for a Matter stack running over
 /// BLE during commissioning, and then over either WiFi or Thread when operating.
@@ -140,7 +140,7 @@ where
     }
 }
 
-impl<M, T, E> MatterStack<'_, WirelessBle<M, T, E>>
+impl<const B: usize, M, T, E> MatterStack<'_, B, WirelessBle<M, T, E>>
 where
     M: RawMutex + Send + Sync + 'static,
     T: WirelessNetwork,
@@ -172,62 +172,43 @@ where
         D: Mdns,
         G: GattPeripheral,
     {
-        loop {
-            let commissioned = self.is_commissioned().await?;
+        let commissioned = self.is_commissioned().await?;
 
-            if !commissioned {
-                self.matter()
-                    .enable_basic_commissioning(DiscoveryCapabilities::BLE, 0)
-                    .await?; // TODO
+        if !commissioned {
+            self.matter()
+                .enable_basic_commissioning(DiscoveryCapabilities::BLE, 0)
+                .await?; // TODO
 
-                // // Return the requested network with priority
-                // if let Some(network_id) = self.connect_requested.take() {
-                //     let network = self
-                //         .networks
-                //         .iter()
-                //         .find(|network| network.id() == network_id);
+            // // Return the requested network with priority
+            // if let Some(network_id) = self.connect_requested.take() {
+            //     let network = self
+            //         .networks
+            //         .iter()
+            //         .find(|network| network.id() == network_id);
 
-                //     if let Some(network) = network {
-                //         info!(
-                //             "Trying with requested network first - ID: {}",
-                //             network.display()
-                //         );
+            //     if let Some(network) = network {
+            //         info!(
+            //             "Trying with requested network first - ID: {}",
+            //             network.display()
+            //         );
 
-                //         f(network)?;
-                //         return Ok(true);
-                //     }
-                // }
-
-                let mut buf = self.network.creds_buf.lock().await;
-
-                let mut mgr = WirelessMgr::new(&self.network.networks, &net_ctl, &mut buf);
-
-                let mut net_task =
-                    pin!(self.run_btp_coex(&net_stack, &netif, &mut mdns, &mut gatt));
-                let mut mgr_task = pin!(mgr.run());
-
-                select(&mut net_task, &mut mgr_task).coalesce().await?;
-            } else {
-                info!("Running in commissioned mode (wireless only)");
-
-                let mut buf = self.network.creds_buf.lock().await;
-
-                let mut mgr = WirelessMgr::new(&self.network.networks, &net_ctl, &mut buf);
-
-                self.matter().disable_commissioning()?;
-
-                let mut net_task = pin!(self.run_oper_net(
-                    &net_stack,
-                    &netif,
-                    &mut mdns,
-                    core::future::pending(),
-                    Option::<(NoNetwork, NoNetwork)>::None
-                ));
-                let mut mgr_task = pin!(mgr.run());
-
-                select(&mut net_task, &mut mgr_task).coalesce().await?;
-            }
+            //         f(network)?;
+            //         return Ok(true);
+            //     }
+            // }
         }
+
+        let mut buf = self.network.creds_buf.lock().await;
+
+        let mut mgr = WirelessMgr::new(&self.network.networks, &net_ctl, &mut buf);
+
+        let mut net_task = pin_alloc!(
+            self.bump,
+            self.run_btp_coex(&net_stack, &netif, &mut mdns, &mut gatt)
+        );
+        let mut mgr_task = pin_alloc!(self.bump, mgr.run());
+
+        select(&mut net_task, &mut mgr_task).coalesce().await
     }
 
     async fn run_btp_coex<S, N, D, P>(
@@ -247,22 +228,28 @@ where
 
         let btp = Btp::new(peripheral, &self.network.btp_context);
 
-        let mut btp_task = pin!(btp.run(
-            "BT",
-            self.matter().dev_det(),
-            self.matter().dev_comm().discriminator,
-        ));
+        let mut btp_task = pin_alloc!(
+            self.bump,
+            btp.run(
+                "BT",
+                self.matter().dev_det(),
+                self.matter().dev_comm().discriminator,
+            )
+        );
 
-        // TODO: Run till commissioning is complete
-        let mut net_task = pin!(self.run_oper_net(
-            &net_stack,
-            &netif,
-            &mut mdns,
-            core::future::pending(),
-            Some((&btp, &btp))
-        ));
+        let mut net_task = pin_alloc!(
+            self.bump,
+            self.run_oper_net(&net_stack, core::future::pending(), Some((&btp, &btp)))
+        );
 
-        select(&mut btp_task, &mut net_task).coalesce().await
+        let mut mdns_task = pin_alloc!(
+            self.bump,
+            self.run_oper_netif_mdns(&net_stack, &netif, &mut mdns)
+        );
+
+        select3(&mut btp_task, &mut net_task, &mut mdns_task)
+            .coalesce()
+            .await
     }
 
     async fn run_btp<P>(&'static self, peripheral: P) -> Result<(), Error>
@@ -327,8 +314,8 @@ impl<S, N, C, M, G> PreexistingWireless<S, N, C, M, G> {
     }
 }
 
-pub(crate) struct MatterStackWirelessTask<'a, M, T, E, H, U>(
-    &'a MatterStack<'a, WirelessBle<M, T, E>>,
+pub(crate) struct MatterStackWirelessTask<'a, const B: usize, M, T, E, H, U>(
+    &'a MatterStack<'a, B, WirelessBle<M, T, E>>,
     H,
     U,
 )
