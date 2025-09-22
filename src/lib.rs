@@ -480,7 +480,7 @@ where
     {
         #[derive(Clone, Debug, Eq, PartialEq, Hash)]
         #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-        struct Netif {
+        struct NetifState {
             ipv6: Ipv6Addr,
             ipv4: Ipv4Addr,
             mac: [u8; 8],
@@ -488,7 +488,7 @@ where
             netif_index: u32,
         }
 
-        impl Netif {
+        impl NetifState {
             pub const fn new() -> Self {
                 Self {
                     ipv6: Ipv6Addr::UNSPECIFIED,
@@ -500,53 +500,53 @@ where
             }
         }
 
-        fn load_netif<C>(net_ctl: C, netif: &mut Netif) -> Result<(), Error>
+        fn load_netif_state<I>(net_diag: I, state: &mut NetifState) -> Result<(), Error>
         where
-            C: NetifDiag,
+            I: NetifDiag,
         {
-            netif.operational = false;
-            netif.ipv6 = Ipv6Addr::UNSPECIFIED;
-            netif.ipv4 = Ipv4Addr::UNSPECIFIED;
-            netif.mac = [0; 8];
+            state.operational = false;
+            state.ipv6 = Ipv6Addr::UNSPECIFIED;
+            state.ipv4 = Ipv4Addr::UNSPECIFIED;
+            state.mac = [0; 8];
 
-            net_ctl.netifs(&mut |ni| {
+            net_diag.netifs(&mut |ni| {
                 if ni.operational && !ni.ipv6_addrs.is_empty() {
-                    netif.operational = true;
-                    netif.ipv6 = ni.ipv6_addrs[0];
-                    netif.ipv4 = ni
+                    state.operational = true;
+                    state.ipv6 = ni.ipv6_addrs[0];
+                    state.ipv4 = ni
                         .ipv4_addrs
                         .first()
                         .copied()
                         .unwrap_or(Ipv4Addr::UNSPECIFIED);
-                    netif.mac = *ni.hw_addr;
-                    netif.netif_index = ni.netif_index;
+                    state.mac = *ni.hw_addr;
+                    state.netif_index = ni.netif_index;
                 }
 
                 Ok(())
             })
         }
 
-        async fn wait_changed<C>(
-            net_ctl: C,
-            cur_netif: &Netif,
-            new_netif: &mut Netif,
+        async fn wait_changed<I>(
+            net_diag: I,
+            cur_state: &NetifState,
+            new_state: &mut NetifState,
         ) -> Result<(), Error>
         where
-            C: NetifDiag + NetChangeNotif,
+            I: NetifDiag + NetChangeNotif,
         {
             loop {
-                load_netif(&net_ctl, new_netif)?;
+                load_netif_state(&net_diag, new_state)?;
 
-                if &*new_netif != cur_netif {
+                if &*new_state != cur_state {
                     info!(
                         "Netif change detected.\n    Old: {:?}\n    New: {:?}",
-                        cur_netif, new_netif
+                        cur_state, new_state
                     );
                     break Ok(());
                 }
 
                 trace!("No change");
-                net_ctl.wait_changed().await;
+                net_diag.wait_changed().await;
             }
         }
 
@@ -554,17 +554,17 @@ where
         //     self.update_netif_conf(None);
         // });
 
-        let mut new_netif = Netif::new();
-        load_netif(&netif, &mut new_netif)?;
+        let mut new_state = NetifState::new();
+        load_netif_state(&netif, &mut new_state)?;
 
         loop {
-            let cur_netif = new_netif.clone();
+            let cur_state = new_state.clone();
 
-            let mut netif_changed_task = pin!(wait_changed(&netif, &cur_netif, &mut new_netif));
+            let mut netif_changed_task = pin!(wait_changed(&netif, &cur_state, &mut new_state));
 
             let mut mdns_task = pin!(async {
-                if cur_netif.operational {
-                    info!("Netif up: {:?}", cur_netif);
+                if cur_state.operational {
+                    info!("Netif up: {:?}", cur_state);
 
                     let udp_bind = unwrap!(net_stack.udp_bind());
 
@@ -575,10 +575,10 @@ where
                             .run(
                                 self.matter(),
                                 &udp_bind,
-                                &cur_netif.mac,
-                                cur_netif.ipv4,
-                                cur_netif.ipv6,
-                                cur_netif.netif_index,
+                                &cur_state.mac,
+                                cur_state.ipv4,
+                                cur_state.ipv6,
+                                cur_state.netif_index,
                             )
                             .await;
 
