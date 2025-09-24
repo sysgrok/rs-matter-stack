@@ -1,5 +1,6 @@
 use core::fmt::Display;
 
+use cfg_if::cfg_if;
 use embassy_futures::select::select;
 use embassy_sync::blocking_mutex::raw::{NoopRawMutex, RawMutex};
 
@@ -523,7 +524,25 @@ mod file {
     }
 }
 
-const KV_BLOB_BUF_SIZE: usize = 4096;
+cfg_if! {
+    if #[cfg(feature = "kv-blob-store-65536")] {
+        const KV_BLOB_BUF_SIZE: usize = 65536;
+    } else if #[cfg(feature = "kv-blob-store-32768")] {
+        const KV_BLOB_BUF_SIZE: usize = 32768;
+    } else if #[cfg(feature = "kv-blob-store-16384")] {
+        const KV_BLOB_BUF_SIZE: usize = 16384;
+    } else if #[cfg(feature = "kv-blob-store-8192")] {
+        const KV_BLOB_BUF_SIZE: usize = 8192;
+    } else if #[cfg(feature = "kv-blob-store-4096")] {
+        const KV_BLOB_BUF_SIZE: usize = 4096;
+    } else if #[cfg(feature = "kv-blob-store-2048")] {
+        const KV_BLOB_BUF_SIZE: usize = 2048;
+    } else if #[cfg(feature = "kv-blob-store-1024")] {
+        const KV_BLOB_BUF_SIZE: usize = 1024;
+    } else {
+        const KV_BLOB_BUF_SIZE: usize = 4096;
+    }
+}
 
 /// A buffer for the `KvBlobStore` trait.
 pub type KvBlobBuffer = heapless::Vec<u8, KV_BLOB_BUF_SIZE>;
