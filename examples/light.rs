@@ -38,6 +38,8 @@ use rs_matter_stack::wireless::WifiMatterStack;
 
 use static_cell::StaticCell;
 
+const BUMP_SIZE: usize = 24000;
+
 fn main() -> Result<(), Error> {
     env_logger::init_from_env(
         env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "info"),
@@ -78,7 +80,7 @@ fn main() -> Result<(), Error> {
     // Using `pin!` is completely optional, but saves some memory due to `rustc`
     // not being very intelligent w.r.t. stack usage in async functions
     let store = stack.create_shared_store(DirKvBlobStore::new_default());
-    let mut matter = pin!(stack.run(
+    let mut matter = pin!(stack.run_coex(
         PreexistingWireless::new(
             // The Matter stack needs UDP sockets to communicate with other Matter devices
             edge_nal_std::Stack::new(),
@@ -113,7 +115,7 @@ fn main() -> Result<(), Error> {
 
             // Let the Matter stack know that we have changed
             // the state of our Light device
-            stack.notify_changed();
+            stack.notify_cluster_changed(1, on_off::OnOffHandler::CLUSTER.id);
 
             info!("Light toggled");
         }
@@ -128,7 +130,7 @@ fn main() -> Result<(), Error> {
 /// The Matter stack is allocated statically to avoid
 /// program stack blowups.
 /// It is also a mandatory requirement when the `WifiBle` stack variation is used.
-static MATTER_STACK: StaticCell<WifiMatterStack<StdRawMutex>> = StaticCell::new();
+static MATTER_STACK: StaticCell<WifiMatterStack<BUMP_SIZE, StdRawMutex>> = StaticCell::new();
 
 /// Endpoint 0 (the root endpoint) always runs
 /// the hidden Matter system clusters, so we pick ID=1
@@ -138,7 +140,7 @@ const LIGHT_ENDPOINT_ID: u16 = 1;
 const NODE: Node = Node {
     id: 0,
     endpoints: &[
-        WifiMatterStack::<StdRawMutex, ()>::root_endpoint(),
+        WifiMatterStack::<0, StdRawMutex, ()>::root_endpoint(),
         Endpoint {
             id: LIGHT_ENDPOINT_ID,
             device_types: devices!(DEV_TYPE_ON_OFF_LIGHT),
