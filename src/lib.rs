@@ -29,8 +29,7 @@ use rs_matter::dm::clusters::dev_att::DevAttDataFetcher;
 use rs_matter::dm::clusters::gen_diag::NetifDiag;
 use rs_matter::dm::networks::NetChangeNotif;
 use rs_matter::dm::subscriptions::Subscriptions;
-use rs_matter::dm::IMBuffer;
-use rs_matter::dm::{AsyncHandler, AsyncMetadata};
+use rs_matter::dm::{AsyncHandler, AsyncMetadata, ClusterId, DataModel, EndptId, IMBuffer};
 use rs_matter::error::{Error, ErrorCode};
 use rs_matter::respond::{DefaultResponder, ExchangeHandler, Responder};
 use rs_matter::transport::network::{Address, ChainedNetwork, NetworkReceive, NetworkSend};
@@ -344,13 +343,18 @@ where
     /// Notifies the Matter instance that there is a change in the state
     /// of one of the clusters.
     ///
-    /// User is expected to call this method when user-provided clusters
-    /// change their state.
+    /// User is expected to call this method when a user-provided cluster
+    /// changes its state.
     ///
     /// This is necessary so as the Matter instance can notify clients
     /// that have active subscriptions to some of the changed clusters.
-    pub fn notify_changed(&self) {
-        self.subscriptions.notify_changed();
+    ///
+    /// # Arguments
+    /// - `endpoint_id` - the endpoint ID where the cluster is located
+    /// - `cluster_id` - the ID of the cluster that has changed
+    pub fn notify_cluster_changed(&self, endpoint_id: EndptId, cluster_id: ClusterId) {
+        self.subscriptions
+            .notify_cluster_changed(endpoint_id, cluster_id);
     }
 
     // /// User code hook to get the state of the netif passed to the
@@ -607,10 +611,12 @@ where
         // Reset the Matter transport buffers and all sessions first
         // self.matter().reset_transport()?;
 
-        let mut responder = pin!(self.run_responder(&handler));
-        let mut handler = pin!(handler.run());
+        let dm = DataModel::new(self.matter(), &self.buffers, &self.subscriptions, handler);
 
-        select(&mut responder, &mut handler).coalesce().await
+        let mut responder = pin!(self.run_responder(&dm));
+        let mut dm_job = pin!(dm.run());
+
+        select(&mut responder, &mut dm_job).coalesce().await
     }
 
     async fn run_handler_with_bump<H>(&self, handler: H) -> Result<(), Error>
@@ -621,10 +627,12 @@ where
         // Reset the Matter transport buffers and all sessions first
         // self.matter().reset_transport()?;
 
-        let mut responder = pin_alloc!(self.bump, self.run_responder_with_bump(&handler));
-        let mut handler = pin_alloc!(self.bump, handler.run());
+        let dm = DataModel::new(self.matter(), &self.buffers, &self.subscriptions, handler);
 
-        select(&mut responder, &mut handler).coalesce().await
+        let mut responder = pin_alloc!(self.bump, self.run_responder_with_bump(&dm));
+        let mut dm_job = pin!(dm.run());
+
+        select(&mut responder, &mut dm_job).coalesce().await
     }
 
     fn run_psm<'t, S, C>(
@@ -638,12 +646,14 @@ where
         persist.run()
     }
 
-    async fn run_responder<H>(&self, handler: H) -> Result<(), Error>
+    async fn run_responder<const SN: usize, H>(
+        &self,
+        dm: &DataModel<'_, SN, PooledBuffers<MAX_IM_BUFFERS, NoopRawMutex, IMBuffer>, H>,
+    ) -> Result<(), Error>
     where
         H: AsyncHandler + AsyncMetadata,
     {
-        let responder =
-            DefaultResponder::new(self.matter(), &self.buffers, &self.subscriptions, handler);
+        let responder = DefaultResponder::new(dm);
 
         // Run the responder with up to MAX_RESPONDERS handlers (i.e. MAX_RESPONDERS exchanges can be handled simultenously)
         // Clients trying to open more exchanges than the ones currently running will get "I'm busy, please try again later"
@@ -652,12 +662,14 @@ where
         Ok(())
     }
 
-    async fn run_responder_with_bump<H>(&self, handler: H) -> Result<(), Error>
+    async fn run_responder_with_bump<const SN: usize, H>(
+        &self,
+        dm: &DataModel<'_, SN, PooledBuffers<MAX_IM_BUFFERS, NoopRawMutex, IMBuffer>, H>,
+    ) -> Result<(), Error>
     where
         H: AsyncHandler + AsyncMetadata,
     {
-        let responder =
-            DefaultResponder::new(self.matter(), &self.buffers, &self.subscriptions, handler);
+        let responder = DefaultResponder::new(dm);
 
         let mut actual = pin_alloc!(
             self.bump,

@@ -37,6 +37,8 @@ use rs_matter_stack::persist::DirKvBlobStore;
 
 use static_cell::StaticCell;
 
+const BUMP_SIZE: usize = 20000;
+
 fn main() -> Result<(), Error> {
     env_logger::Builder::from_env(
         env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "info"),
@@ -111,7 +113,7 @@ fn main() -> Result<(), Error> {
 
             // Let the Matter stack know that we have changed
             // the state of our Light device
-            stack.notify_changed();
+            stack.notify_cluster_changed(1, on_off::OnOffHandler::CLUSTER.id);
 
             info!("Light toggled");
         }
@@ -123,7 +125,7 @@ fn main() -> Result<(), Error> {
 
 /// The Matter stack is allocated statically to avoid
 /// program stack blowups.
-static MATTER_STACK: StaticCell<EthMatterStack> = StaticCell::new();
+static MATTER_STACK: StaticCell<EthMatterStack<BUMP_SIZE, ()>> = StaticCell::new();
 
 /// Endpoint 0 (the root endpoint) always runs
 /// the hidden Matter system clusters, so we pick ID=1
@@ -133,7 +135,7 @@ const LIGHT_ENDPOINT_ID: u16 = 1;
 const NODE: Node = Node {
     id: 0,
     endpoints: &[
-        EthMatterStack::<()>::root_endpoint(),
+        EthMatterStack::<0, ()>::root_endpoint(),
         Endpoint {
             id: LIGHT_ENDPOINT_ID,
             device_types: devices!(DEV_TYPE_ON_OFF_LIGHT),
