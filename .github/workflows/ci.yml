@@ -54,4 +54,4 @@ jobs:
 
       - name: Examples
         if: matrix.features == 'os'
-        run: cargo build --examples --features ${{matrix.features}},nix,log
+        run: cargo build --examples --features ${{matrix.features}},nix,log,examples
