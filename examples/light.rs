@@ -15,10 +15,11 @@ use embassy_time::{Duration, Timer};
 
 use log::info;
 
+use rs_matter::dm::clusters::on_off::test::TestOnOffDeviceLogic;
+use rs_matter::dm::clusters::on_off::OnOffHooks;
 use rs_matter_stack::matter::dm::clusters::desc::{ClusterHandler as _, DescHandler};
 use rs_matter_stack::matter::dm::clusters::net_comm::NetworkType;
 use rs_matter_stack::matter::dm::clusters::on_off;
-use rs_matter_stack::matter::dm::clusters::on_off::{ClusterHandler as _, OnOffHandler};
 use rs_matter_stack::matter::dm::devices::test::{TEST_DEV_ATT, TEST_DEV_COMM, TEST_DEV_DET};
 use rs_matter_stack::matter::dm::devices::DEV_TYPE_ON_OFF_LIGHT;
 use rs_matter_stack::matter::dm::networks::unix::UnixNetifs;
@@ -59,15 +60,22 @@ fn main() -> Result<(), Error> {
 
     // Our "light" on-off cluster.
     // Can be anything implementing `rs_matter::dm::AsyncHandler`
-    let on_off = on_off::OnOffHandler::new(Dataver::new_rand(stack.matter().rand()));
+    let on_off = on_off::OnOffHandler::new_standalone(
+        Dataver::new_rand(stack.matter().rand()),
+        1,
+        TestOnOffDeviceLogic::new(),
+    );
 
     // Chain our endpoint clusters with the
     // (root) Endpoint 0 system clusters in the final handler
     let handler = EmptyHandler
         // Our on-off cluster, on Endpoint 1
         .chain(
-            EpClMatcher::new(Some(LIGHT_ENDPOINT_ID), Some(OnOffHandler::CLUSTER.id)),
-            Async(on_off::HandlerAdaptor(&on_off)),
+            EpClMatcher::new(
+                Some(LIGHT_ENDPOINT_ID),
+                Some(TestOnOffDeviceLogic::CLUSTER.id),
+            ),
+            on_off::HandlerAsyncAdaptor(&on_off),
         )
         // Each Endpoint needs a Descriptor cluster too
         // Just use the one that `rs-matter` provides out of the box
@@ -111,11 +119,11 @@ fn main() -> Result<(), Error> {
             Timer::after(Duration::from_secs(5)).await;
 
             // Toggle
-            on_off.set(!on_off.get());
+            on_off.set_on_off(!on_off.on_off());
 
             // Let the Matter stack know that we have changed
             // the state of our Light device
-            stack.notify_cluster_changed(1, on_off::OnOffHandler::CLUSTER.id);
+            stack.notify_cluster_changed(1, TestOnOffDeviceLogic::CLUSTER.id);
 
             info!("Light toggled");
         }
@@ -144,7 +152,7 @@ const NODE: Node = Node {
         Endpoint {
             id: LIGHT_ENDPOINT_ID,
             device_types: devices!(DEV_TYPE_ON_OFF_LIGHT),
-            clusters: clusters!(DescHandler::CLUSTER, OnOffHandler::CLUSTER),
+            clusters: clusters!(DescHandler::CLUSTER, TestOnOffDeviceLogic::CLUSTER),
         },
     ],
 };
