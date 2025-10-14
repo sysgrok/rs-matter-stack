@@ -12,9 +12,6 @@
 
 use core::pin::pin;
 
-use embassy_futures::select::select;
-use embassy_time::{Duration, Timer};
-
 use env_logger::Target;
 use log::info;
 
@@ -31,7 +28,6 @@ use rs_matter_stack::matter::dm::{Async, Dataver, Endpoint, Node};
 use rs_matter_stack::matter::dm::{EmptyHandler, EpClMatcher};
 use rs_matter_stack::matter::error::Error;
 use rs_matter_stack::matter::utils::init::InitMaybeUninit;
-use rs_matter_stack::matter::utils::select::Coalesce;
 use rs_matter_stack::matter::{clusters, devices};
 use rs_matter_stack::mdns::ZeroconfMdns;
 use rs_matter_stack::persist::DirKvBlobStore;
@@ -60,11 +56,11 @@ fn main() -> Result<(), Error> {
         ));
 
     // Our "light" on-off cluster.
-    // Can be anything implementing `rs_matter::dm::AsyncHandler`
+    // It will toggle the light state every 5 seconds
     let on_off = on_off::OnOffHandler::new_standalone(
         Dataver::new_rand(stack.matter().rand()),
         LIGHT_ENDPOINT_ID,
-        TestOnOffDeviceLogic::new(),
+        TestOnOffDeviceLogic::new(true),
     );
 
     // Chain our endpoint clusters with the
@@ -87,7 +83,7 @@ fn main() -> Result<(), Error> {
     // Run the Matter stack with our handler
     // Using `pin!` is completely optional, but reduces the size of the final future
     let store = stack.create_shared_store(DirKvBlobStore::new_default());
-    let mut matter = pin!(stack.run_preex(
+    let matter = pin!(stack.run_preex(
         // The Matter stack needs UDP sockets to communicate with other Matter devices
         edge_nal_std::Stack::new(),
         // Will try to find a default network interface
@@ -102,29 +98,8 @@ fn main() -> Result<(), Error> {
         (),
     ));
 
-    // Just for demoing purposes:
-    //
-    // Run a sample loop that simulates state changes triggered by the HAL
-    // Changes will be properly communicated to the Matter controllers
-    // (i.e. Google Home, Alexa) and other Matter devices thanks to subscriptions
-    let mut device = pin!(async {
-        loop {
-            // Simulate user toggling the light with a physical switch every 5 seconds
-            Timer::after(Duration::from_secs(5)).await;
-
-            // Toggle
-            on_off.set_on_off(!on_off.on_off());
-
-            // Let the Matter stack know that we have changed
-            // the state of our Light device
-            stack.notify_cluster_changed(1, TestOnOffDeviceLogic::CLUSTER.id);
-
-            info!("Light toggled");
-        }
-    });
-
-    // Schedule the Matter run & the device loop together
-    futures_lite::future::block_on(select(&mut matter, &mut device).coalesce())
+    // Schedule the Matter run
+    futures_lite::future::block_on(matter)
 }
 
 /// The Matter stack is allocated statically to avoid
