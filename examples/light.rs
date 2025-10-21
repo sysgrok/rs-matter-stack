@@ -80,9 +80,15 @@ fn main() -> Result<(), Error> {
             Async(DescHandler::new(Dataver::new_rand(stack.matter().rand())).adapt()),
         );
 
+    // Create the persister & load any previously saved state
+    let persist = stack.create_persist(DirKvBlobStore::new_default());
+    embassy_futures::block_on(persist.load())?;
+
+    // Now that the state is loaded, open a commissioning window if the stack is not yet commissioned
+    stack.open_commissioning_if_needed()?;
+
     // Run the Matter stack with our handler
     // Using `pin!` is completely optional, but reduces the size of the final future
-    let store = stack.create_shared_store(DirKvBlobStore::new_default());
     let matter = pin!(stack.run_coex(
         PreexistingWireless::new(
             // The Matter stack needs UDP sockets to communicate with other Matter devices
@@ -96,7 +102,7 @@ fn main() -> Result<(), Error> {
             BluerGattPeripheral::new(None),
         ),
         // Will persist in `<tmp-dir>/rs-matter`
-        &store,
+        &persist,
         // Our `AsyncHandler` + `AsyncMetadata` impl
         (NODE, handler),
         // No user task to run

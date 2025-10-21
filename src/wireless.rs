@@ -21,6 +21,7 @@ use rs_matter::utils::sync::{blocking, IfMutex};
 use crate::mdns::Mdns;
 use crate::nal::NetStack;
 use crate::network::{Embedding, Network};
+use crate::persist::MatterPersist;
 use crate::private::Sealed;
 use crate::{pin_alloc, MatterStack};
 
@@ -37,6 +38,12 @@ const MAX_WIRELESS_NETWORKS: usize = 2;
 /// A type alias for a Matter stack running over either Wifi or Thread (and BLE, during commissioning).
 pub type WirelessMatterStack<'a, const B: usize, M, T, E = ()> =
     MatterStack<'a, B, WirelessBle<M, T, E>>;
+
+/// A type alias for the Matter Persister created by calling `WirelessMatterStack::create_persist`.
+pub type WirelessMatterPersist<'a, S, M, T> =
+    MatterPersist<'a, S, WirelessPersistContext<'a, M, T>>;
+
+type WirelessPersistContext<'a, M, T> = &'a WirelessNetworks<MAX_WIRELESS_NETWORKS, M, T>;
 
 /// An implementation of the `Network` trait for a Matter stack running over
 /// BLE during commissioning, and then over either WiFi or Thread when operating.
@@ -127,16 +134,20 @@ where
 
     type Embedding = E;
 
+    fn init() -> impl Init<Self> {
+        WirelessBle::init()
+    }
+
+    fn discovery_capabilities(&self) -> DiscoveryCapabilities {
+        DiscoveryCapabilities::BLE
+    }
+
     fn persist_context(&self) -> Self::PersistContext<'_> {
         &self.networks
     }
 
     fn embedding(&self) -> &Self::Embedding {
         &self.embedding
-    }
-
-    fn init() -> impl Init<Self> {
-        WirelessBle::init()
     }
 }
 
@@ -172,32 +183,6 @@ where
         D: Mdns,
         G: GattPeripheral,
     {
-        let commissioned = self.is_commissioned().await?;
-
-        if !commissioned {
-            self.matter()
-                .enable_basic_commissioning(DiscoveryCapabilities::BLE, 0)
-                .await?; // TODO
-
-            // // Return the requested network with priority
-            // if let Some(network_id) = self.connect_requested.take() {
-            //     let network = self
-            //         .networks
-            //         .iter()
-            //         .find(|network| network.id() == network_id);
-
-            //     if let Some(network) = network {
-            //         info!(
-            //             "Trying with requested network first - ID: {}",
-            //             network.display()
-            //         );
-
-            //         f(network)?;
-            //         return Ok(true);
-            //     }
-            // }
-        }
-
         let mut buf = self.network.creds_buf.lock().await;
 
         let mut mgr = WirelessMgr::new(&self.network.networks, &net_ctl, &mut buf);

@@ -17,7 +17,7 @@ use rs_matter::utils::select::Coalesce;
 use crate::mdns::Mdns;
 use crate::nal::NetStack;
 use crate::network::{Embedding, Network};
-use crate::persist::{KvBlobStore, SharedKvBlobStore};
+use crate::persist::{KvBlobStore, MatterPersist};
 use crate::private::Sealed;
 use crate::{pin_alloc, MatterStack, UserTask};
 
@@ -47,20 +47,28 @@ where
 
     type Embedding = E;
 
-    fn persist_context(&self) -> Self::PersistContext<'_> {}
-
-    fn embedding(&self) -> &Self::Embedding {
-        &self.embedding
-    }
-
     fn init() -> impl Init<Self> {
         init!(Self {
             embedding <- E::init(),
         })
     }
+
+    fn discovery_capabilities(&self) -> DiscoveryCapabilities {
+        DiscoveryCapabilities::IP
+    }
+
+    fn persist_context(&self) -> Self::PersistContext<'_> {}
+
+    fn embedding(&self) -> &Self::Embedding {
+        &self.embedding
+    }
 }
 
+// A type alias for a Matter stack running over Ethernet.
 pub type EthMatterStack<'a, const B: usize, E = ()> = MatterStack<'a, B, Eth<E>>;
+
+/// A type alias for the Matter Persister created by calling `EthMatterStack::create_persist`.
+pub type EthMatterPersist<'a, S> = MatterPersist<'a, S, ()>;
 
 /// A trait representing a task that needs access to the operational Ethernet interface
 /// (Network stack and Netif) to perform its work.
@@ -180,10 +188,10 @@ where
     /// Run the Matter stack for a pre-existing Ethernet network.
     ///
     /// Parameters:
-    /// - `netif` - a user-provided `Netif` implementation for the Ethernet network
     /// - `net_stack` - a user-provided network stack implementation
+    /// - `netif` - a user-provided `Netif` implementation for the Ethernet network
     /// - `mdns` - a user-provided mDNS implementation
-    /// - `persist` - a user-provided `Persist` implementation
+    /// - `persist` - an `EthMatterPersist` implementation instantiated on the stack with `create_persist`
     /// - `handler` - a user-provided DM handler implementation
     /// - `user` - a user-provided future that will be polled only when the netif interface is up
     pub fn run_preex<'t, U, N, M, S, H, X>(
@@ -191,7 +199,7 @@ where
         net_stack: U,
         netif: N,
         mdns: M,
-        store: &'t SharedKvBlobStore<'_, S>,
+        persist: &'t EthMatterPersist<'_, S>,
         handler: H,
         user: X,
     ) -> impl Future<Output = Result<(), Error>> + 't
@@ -205,7 +213,7 @@ where
     {
         self.run(
             PreexistingEthernet::new(net_stack, netif, mdns),
-            store,
+            persist,
             handler,
             user,
         )
@@ -215,13 +223,13 @@ where
     ///
     /// Parameters:
     /// - `ethernet` - a user-provided `Ethernet` implementation
-    /// - `persist` - a user-provided `Persist` implementation
+    /// - `persist` - an `EthMatterPersist` implementation instantiated on the stack with `create_persist`
     /// - `handler` - a user-provided DM handler implementation
     /// - `user` - a user-provided future that will be polled only when the netif interface is up
     pub async fn run<N, S, H, X>(
         &self,
         mut ethernet: N,
-        store: &SharedKvBlobStore<'_, S>,
+        persist: &EthMatterPersist<'_, S>,
         handler: H,
         user: X,
     ) -> Result<(), Error>
@@ -241,20 +249,10 @@ where
             self.bump.reset();
         });
 
-        let persist = self.create_persist(store);
-
-        persist.load().await?;
-
         self.matter().reset_transport()?;
 
-        if !self.is_commissioned().await? {
-            self.matter()
-                .enable_basic_commissioning(DiscoveryCapabilities::IP, 0)
-                .await?; // TODO
-        }
-
         let mut net_task = pin_alloc!(self.bump, self.run_ethernet(&mut ethernet, handler, user));
-        let mut persist_task = pin_alloc!(self.bump, self.run_psm(&persist));
+        let mut persist_task = pin_alloc!(self.bump, self.run_psm(persist));
 
         select(&mut net_task, &mut persist_task).coalesce().await
     }

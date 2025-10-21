@@ -31,7 +31,9 @@ use rs_matter::dm::networks::NetChangeNotif;
 use rs_matter::dm::subscriptions::Subscriptions;
 use rs_matter::dm::{AsyncHandler, AsyncMetadata, ClusterId, DataModel, EndptId, IMBuffer};
 use rs_matter::error::{Error, ErrorCode};
+use rs_matter::pairing::qr::QrTextType;
 use rs_matter::respond::{DefaultResponder, ExchangeHandler, Responder};
+use rs_matter::sc::pake::MAX_COMM_WINDOW_TIMEOUT_SECS;
 use rs_matter::transport::network::{Address, ChainedNetwork, NetworkReceive, NetworkSend};
 use rs_matter::utils::epoch::Epoch;
 use rs_matter::utils::init::{init, Init};
@@ -297,25 +299,19 @@ where
         })
     }
 
-    /// Create a new `SharedKvBlobStore` instance wrapping the
-    /// provided `KvBlobStore` implementation and the internal store buffer
-    /// available in the `MatterStack` instance.
-    pub fn create_shared_store<S>(&self, store: S) -> SharedKvBlobStore<'_, S>
-    where
-        S: KvBlobStore,
-    {
-        SharedKvBlobStore::new(store, &self.store_buf)
-    }
-
     /// Create a new `MatterPersist` instance for the Matter stack.
-    fn create_persist<'t, S>(
-        &'t self,
-        store: &'t SharedKvBlobStore<'t, S>,
-    ) -> MatterPersist<'t, S, N::PersistContext<'t>>
+    ///
+    /// # Arguments
+    /// - `store` - a reference to a `KvBlobStore` instance
+    pub fn create_persist<'t, S>(&'t self, store: S) -> MatterPersist<'t, S, N::PersistContext<'t>>
     where
-        S: KvBlobStore,
+        S: KvBlobStore + 't,
     {
-        MatterPersist::new(store, self.matter(), self.network().persist_context())
+        MatterPersist::new(
+            SharedKvBlobStore::new(store, &self.store_buf),
+            self.matter(),
+            self.network().persist_context(),
+        )
     }
 
     /// A utility method to replace the initial Device Attestation Data Fetcher with another one.
@@ -323,6 +319,35 @@ where
     /// Reasoning and use-cases explained in the documentation of `replace_mdns`.
     pub fn replace_dev_att(&mut self, dev_att: &'a dyn DevAttDataFetcher) {
         self.matter.replace_dev_att(dev_att);
+    }
+
+    /// A utility method to open the commissioning window if the device is not yet commissioned.
+    ///
+    /// This method also prints the QR code and text to the console.
+    ///
+    /// NOTE: The state of the Matter instance should be loaded first, via the Matter Persister
+    /// returned by `create_persist`, otherwise the Matter instance will always be uncommissioned!
+    ///
+    /// This method is useful primarily for development/demo purposes. In production scenarios,
+    /// it is likely that the user would require more fine-graned control over when to open
+    /// the commissioning window, with what timeout, whether to print the QR code, etc.
+    pub fn open_commissioning_if_needed(&self) -> Result<(), Error> {
+        if !self.matter().is_commissioned() {
+            info!("Device is not commissioned yet, opening commissioning window...");
+
+            self.matter()
+                .open_basic_comm_window(MAX_COMM_WINDOW_TIMEOUT_SECS)?;
+            self.matter()
+                .print_standard_qr_text(self.network.discovery_capabilities())?;
+            self.matter().print_standard_qr_code(
+                QrTextType::Unicode,
+                self.network.discovery_capabilities(),
+            )?;
+        } else {
+            info!("Device is already commissioned");
+        }
+
+        Ok(())
     }
 
     /// Get a reference to the `Matter` instance.

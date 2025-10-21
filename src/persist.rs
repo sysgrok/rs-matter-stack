@@ -18,7 +18,7 @@ pub use file::DirKvBlobStore;
 /// A persister for Matter that relies on a BLOB key-value storage
 /// represented by the `KvBlobStore`/`SharedKvBlobStore` traits.
 pub struct MatterPersist<'a, S, C> {
-    store: &'a SharedKvBlobStore<'a, S>,
+    store: SharedKvBlobStore<'a, S>,
     matter: &'a Matter<'a>,
     networks: C,
 }
@@ -29,12 +29,19 @@ where
     C: NetworkPersist,
 {
     /// Create a new `MatterPersist` instance.
-    pub fn new(store: &'a SharedKvBlobStore<'a, S>, matter: &'a Matter<'a>, networks: C) -> Self {
+    pub fn new(store: SharedKvBlobStore<'a, S>, matter: &'a Matter<'a>, networks: C) -> Self {
         Self {
             store,
             matter,
             networks,
         }
+    }
+
+    /// Get the underlying `SharedKvBlobStore` instance.
+    ///
+    /// This can be used to access vendor-specific keys.
+    pub fn store(&self) -> &SharedKvBlobStore<'a, S> {
+        &self.store
     }
 
     /// Reset the persist instance, removing all stored data from the non-volatile storage

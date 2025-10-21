@@ -16,7 +16,6 @@ use rs_matter::dm::networks::NetChangeNotif;
 use rs_matter::dm::{clusters::gen_diag::NetifDiag, AsyncHandler};
 use rs_matter::dm::{AsyncMetadata, Endpoint};
 use rs_matter::error::Error;
-use rs_matter::pairing::DiscoveryCapabilities;
 use rs_matter::transport::network::btp::GattPeripheral;
 use rs_matter::transport::network::NoNetwork;
 use rs_matter::utils::select::Coalesce;
@@ -24,8 +23,8 @@ use rs_matter::utils::select::Coalesce;
 use crate::mdns::Mdns;
 use crate::nal::NetStack;
 use crate::network::Embedding;
-use crate::persist::{KvBlobStore, SharedKvBlobStore};
-use crate::wireless::{GattTask, MatterStackWirelessTask};
+use crate::persist::KvBlobStore;
+use crate::wireless::{GattTask, MatterStackWirelessTask, WirelessMatterPersist};
 use crate::{pin_alloc, UserTask};
 
 use super::{Gatt, PreexistingWireless, WirelessMatterStack};
@@ -34,12 +33,15 @@ use super::{Gatt, PreexistingWireless, WirelessMatterStack};
 pub type ThreadMatterStack<'a, const B: usize, M, E = ()> =
     WirelessMatterStack<'a, B, M, wireless::Thread, E>;
 
+/// A type alias for the Matter Persister created by calling `ThreadMatterStack::create_persist`.
+pub type ThreadMatterPersist<'a, S, M> = WirelessMatterPersist<'a, S, M, wireless::Thread>;
+
 impl<const B: usize, M, E> WirelessMatterStack<'_, B, M, wireless::Thread, E>
 where
     M: RawMutex + Send + Sync + 'static,
     E: Embedding + 'static,
 {
-    /// Run the Matter stack for an already pre-existing wireless network where the BLE and the operational network can co-exist.
+    /// Run the Matter stack for an already pre-established wireless network where the BLE and the Thread stacks can co-exist.
     ///
     /// Parameters:
     /// - `net_stack` - a user-provided `NetStack` implementation
@@ -47,51 +49,50 @@ where
     /// - `controller` - a user-provided `Controller` implementation
     /// - `mdns` - a user-provided `Mdns` implementation
     /// - `gatt` - a user-provided `GattPeripheral` implementation
-    /// - `store` - a `SharedKvBlobStore` implementation wrapping a user-provided `KvBlobStore`
+    /// - `persist` - a `ThreadMatterPersist` implementation instantiated on the stack with `create_persist`
     /// - `handler` - a user-provided DM handler implementation
     /// - `user` - a user-provided future that will be polled only when the netif interface is up
     #[allow(clippy::too_many_arguments)]
-    pub async fn run_preex<U, N, C, D, G, S, H, X>(
+    pub fn run_preex<'t, U, N, C, D, G, S, H, X>(
         &'static self,
         net_stack: U,
         netif: N,
         net_ctl: C,
         mdns: D,
         gatt: G,
-        store: &SharedKvBlobStore<'_, S>,
+        persist: &'t ThreadMatterPersist<'_, S, M>,
         handler: H,
         user: X,
-    ) -> Result<(), Error>
+    ) -> impl Future<Output = Result<(), Error>> + 't
     where
-        U: NetStack,
-        N: NetifDiag + NetChangeNotif,
-        C: NetCtl + ThreadDiag + NetChangeNotif,
-        D: Mdns,
-        G: GattPeripheral,
-        S: KvBlobStore,
-        H: AsyncHandler + AsyncMetadata,
-        X: UserTask,
+        U: NetStack + 't,
+        N: NetifDiag + NetChangeNotif + 't,
+        C: NetCtl + ThreadDiag + NetChangeNotif + 't,
+        D: Mdns + 't,
+        G: GattPeripheral + 't,
+        S: KvBlobStore + 't,
+        H: AsyncHandler + AsyncMetadata + 't,
+        X: UserTask + 't,
     {
         self.run_coex(
             PreexistingWireless::new(net_stack, netif, net_ctl, mdns, gatt),
-            store,
+            persist,
             handler,
             user,
         )
-        .await
     }
 
-    /// Run the Matter stack for a wireless network where the BLE and the operational network can co-exist.
+    /// Run the Matter stack for a wireless network where the BLE and the Wifi stacks can co-exist.
     ///
     /// Parameters:
-    /// - `wireless` - a user-provided `Wireless` implementation
-    /// - `store` - a `SharedKvBlobStore` implementation wrapping a user-provided `KvBlobStore`
+    /// - `thread` - a user-provided `ThreadCoex` implementation
+    /// - `persist` - a `WifiMatterPersist` implementation instantiated on the stack with `create_persist`
     /// - `handler` - a user-provided DM handler implementation
     /// - `user` - a user-provided future that will be polled only when the netif interface is up
     pub async fn run_coex<W, S, H, U>(
         &'static self,
         mut thread: W,
-        store: &SharedKvBlobStore<'_, S>,
+        persist: &ThreadMatterPersist<'_, S, M>,
         handler: H,
         user: U,
     ) -> Result<(), Error>
@@ -111,29 +112,25 @@ where
             self.bump.reset();
         });
 
-        let persist = self.create_persist(store);
-
-        persist.load().await?;
-
         self.matter().reset_transport()?;
 
         let mut net_task = pin_alloc!(self.bump, self.run_thread_coex(&mut thread, handler, user));
-        let mut persist_task = pin_alloc!(self.bump, self.run_psm(&persist));
+        let mut persist_task = pin_alloc!(self.bump, self.run_psm(persist));
 
         select(&mut net_task, &mut persist_task).coalesce().await
     }
 
-    /// Run the Matter stack for a wireless network where the BLE and the operational network cannot co-exist.
+    /// Run the Matter stack for a wireless network where the BLE and the Thread stacks cannot co-exist.
     ///
     /// Parameters:
-    /// - `wireless` - a user-provided `Wireless` + `Gatt` implementation
-    /// - `store` - a `SharedKvBlobStore` implementation wrapping a user-provided `KvBlobStore`
+    /// - `thread` - a user-provided `Thread` + `Gatt` implementation
+    /// - `persist` - a `WifiMatterPersist` implementation instantiated on the stack with `create_persist`
     /// - `handler` - a user-provided DM handler implementation
     /// - `user` - a user-provided future that will be polled only when the netif interface is up
     pub async fn run<W, S, H, U>(
         &'static self,
         thread: W,
-        store: &SharedKvBlobStore<'_, S>,
+        persist: &ThreadMatterPersist<'_, S, M>,
         handler: H,
         user: U,
     ) -> Result<(), Error>
@@ -153,14 +150,10 @@ where
             self.bump.reset();
         });
 
-        let persist = self.create_persist(store);
-
-        persist.load().await?;
-
         self.matter().reset_transport()?;
 
         let mut net_task = pin_alloc!(self.bump, self.run_thread(thread, handler, user));
-        let mut persist_task = pin_alloc!(self.bump, self.run_psm(&persist));
+        let mut persist_task = pin_alloc!(self.bump, self.run_psm(persist));
 
         select(&mut net_task, &mut persist_task).coalesce().await
     }
@@ -194,10 +187,6 @@ where
             let commissioned = self.is_commissioned().await?;
 
             if !commissioned {
-                self.matter()
-                    .enable_basic_commissioning(DiscoveryCapabilities::BLE, 0)
-                    .await?; // TODO
-
                 Gatt::run(
                     &mut thread,
                     MatterStackWirelessTask(self, &handler, &mut user),
@@ -206,7 +195,7 @@ where
             }
 
             if commissioned {
-                self.matter().disable_commissioning()?;
+                self.matter().close_comm_window()?;
             }
 
             Thread::run(
