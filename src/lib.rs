@@ -299,6 +299,13 @@ where
         })
     }
 
+    /// A utility method to replace the initial Device Attestation Data Fetcher with another one.
+    ///
+    /// Reasoning and use-cases explained in the documentation of `replace_mdns`.
+    pub fn replace_dev_att(&mut self, dev_att: &'a dyn DevAttDataFetcher) {
+        self.matter.replace_dev_att(dev_att);
+    }
+
     /// Create a new `MatterPersist` instance for the Matter stack.
     ///
     /// # Arguments
@@ -314,24 +321,33 @@ where
         )
     }
 
-    /// A utility method to replace the initial Device Attestation Data Fetcher with another one.
+    /// An "all in one" persistence initializer method.
     ///
-    /// Reasoning and use-cases explained in the documentation of `replace_mdns`.
-    pub fn replace_dev_att(&mut self, dev_att: &'a dyn DevAttDataFetcher) {
-        self.matter.replace_dev_att(dev_att);
-    }
-
-    /// A utility method to open the commissioning window if the device is not yet commissioned.
+    /// # Arguments
+    /// - `store` - a reference to a `KvBlobStore` instance
     ///
-    /// This method also prints the QR code and text to the console.
-    ///
-    /// NOTE: The state of the Matter instance should be loaded first, via the Matter Persister
-    /// returned by `create_persist`, otherwise the Matter instance will always be uncommissioned!
+    /// This method does the following:
+    /// - Create the Matter Persister for that stack;
+    /// - Load the stack from the just-created persister;
+    /// - Check if the state of the device designates a not-yet-commissioned device and if so:
+    ///   - Open the commissioning window for 15 minutes;
+    ///   - Print the device pairing code and QR text to the console
+    ///   - Print the device QR code to the console
     ///
     /// This method is useful primarily for development/demo purposes. In production scenarios,
     /// it is likely that the user would require more fine-graned control over when to open
     /// the commissioning window, with what timeout, whether to print the QR code, etc.
-    pub fn open_commissioning_if_needed(&self) -> Result<(), Error> {
+    pub async fn create_persist_with_comm_window<'t, S>(
+        &'t self,
+        store: S,
+    ) -> Result<MatterPersist<'t, S, N::PersistContext<'t>>, Error>
+    where
+        S: KvBlobStore + 't,
+    {
+        let persist = self.create_persist(store);
+
+        persist.load().await?;
+
         if !self.matter().is_commissioned() {
             info!("Device is not commissioned yet, opening commissioning window...");
 
@@ -347,7 +363,7 @@ where
             info!("Device is already commissioned");
         }
 
-        Ok(())
+        Ok(persist)
     }
 
     /// Get a reference to the `Matter` instance.

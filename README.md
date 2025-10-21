@@ -133,11 +133,9 @@ fn main() -> Result<(), Error> {
         );
 
     // Create the persister & load any previously saved state
-    let persist = stack.create_persist(DirKvBlobStore::new_default());
-    embassy_futures::block_on(persist.load())?;
-
-    // Now that the state is loaded, open a commissioning window if the stack is not yet commissioned
-    stack.open_commissioning_if_needed()?;
+    let persist = futures_lite::future::block_on(
+        stack.create_persist_with_comm_window(DirKvBlobStore::new_default()),
+    )?;
 
     // Run the Matter stack with our handler
     // Using `pin!` is completely optional, but reduces the size of the final future
