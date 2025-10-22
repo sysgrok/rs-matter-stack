@@ -59,11 +59,11 @@ jobs:
       - name: Prepare bloat report from the previous builds
         if: matrix.features == 'os'
         run: |
-            python .github/scripts/memory/gh_sizes.py \
+            python scripts/memory/gh_sizes.py \
               light infologs-optz-ltofat x86_64-unknown-linux-gnu \
               target/release/examples/light \
               /tmp/bloat_reports/
-            python .github/scripts/memory/gh_sizes.py \
+            python scripts/memory/gh_sizes.py \
               light_eth infologs-optz-ltofat x86_64-unknown-linux-gnu \
               target/release/examples/light_eth \
               /tmp/bloat_reports/
