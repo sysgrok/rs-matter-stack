@@ -34,6 +34,15 @@ use rs_matter_stack::persist::DirKvBlobStore;
 
 use static_cell::StaticCell;
 
+/// The amount of memory where all futures will be allocated.
+/// This does NOT include the Matter stack itself.
+///
+/// The futures of `rs-matter-stack` created during the execution of the `run*` methods
+/// are allocated in a special way using a small bump allocator which results
+/// in a much lower memory usage by those.
+///
+/// If - for your platform - this size is not enough, increase it until
+/// the program runs without panics during the stack initialization.
 const BUMP_SIZE: usize = 20000;
 
 fn main() -> Result<(), Error> {
