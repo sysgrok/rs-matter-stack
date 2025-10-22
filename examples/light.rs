@@ -35,8 +35,9 @@ use rs_matter_stack::wireless::WifiMatterStack;
 
 use static_cell::StaticCell;
 
-/// The amount of memory where all futures will be allocated.
-/// This does NOT include the Matter stack itself.
+/// The amount of memory for allocating all `rs-matter-stack` futures created during
+/// the execution of the `run*` methods.
+/// This does NOT include the rest of the Matter stack.
 ///
 /// The futures of `rs-matter-stack` created during the execution of the `run*` methods
 /// are allocated in a special way using a small bump allocator which results
