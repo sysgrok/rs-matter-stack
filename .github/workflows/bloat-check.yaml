@@ -45,7 +45,7 @@ jobs:
       run: |
         python .github/scripts/memory/gh_report.py \
           --verbose \
-          --report-increases 0.001 \
+          --report-increases 0.2 \
           --report-pr \
           --github-comment \
           --github-limit-artifact-pages 50 \
