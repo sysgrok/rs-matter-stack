@@ -12,7 +12,6 @@
 
 use core::pin::pin;
 
-use env_logger::Target;
 use log::info;
 
 use rs_matter::dm::clusters::on_off::test::TestOnOffDeviceLogic;
@@ -46,11 +45,9 @@ use static_cell::StaticCell;
 const BUMP_SIZE: usize = 20000;
 
 fn main() -> Result<(), Error> {
-    env_logger::Builder::from_env(
+    env_logger::init_from_env(
         env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "info"),
-    )
-    .target(Target::Stdout)
-    .init();
+    );
 
     info!("Starting...");
 
