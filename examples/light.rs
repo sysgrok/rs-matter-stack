@@ -35,7 +35,17 @@ use rs_matter_stack::wireless::WifiMatterStack;
 
 use static_cell::StaticCell;
 
-const BUMP_SIZE: usize = 24000;
+/// The amount of memory for allocating all `rs-matter-stack` futures created during
+/// the execution of the `run*` methods.
+/// This does NOT include the rest of the Matter stack.
+///
+/// The futures of `rs-matter-stack` created during the execution of the `run*` methods
+/// are allocated in a special way using a small bump allocator which results
+/// in a much lower memory usage by those.
+///
+/// If - for your platform - this size is not enough, increase it until
+/// the program runs without panics during the stack initialization.
+const BUMP_SIZE: usize = 23500;
 
 fn main() -> Result<(), Error> {
     env_logger::init_from_env(

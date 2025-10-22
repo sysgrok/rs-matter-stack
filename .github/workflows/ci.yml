@@ -76,6 +76,6 @@ jobs:
 
       - name: Uploading Size Reports
         uses: ./.github/actions/upload-size-reports
-        if: ${{ !env.ACT }}
+        if: ${{ !env.ACT && matrix.features == 'os' }}
         with:
           platform-name: cross-platform
