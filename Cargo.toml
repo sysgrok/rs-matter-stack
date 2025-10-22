@@ -20,12 +20,18 @@ rs-matter = { git = "https://github.com/sysgrok/rs-matter", branch = "next" }
 #edge-nal-std = { git = "https://github.com/sysgrok/edge-net" }
 #edge-mdns = { git = "https://github.com/sysgrok/edge-net" }
 
-[profile.release]
-opt-level = "s"
-
 [profile.dev]
 debug = true
 opt-level = "z"
+
+[profile.release]
+opt-level = "z"
+debug = 0
+debug-assertions = false
+codegen-units = 1 # LLVM can perform better optimizations using a single thread
+lto = "fat"
+incremental = false
+overflow-checks = false
 
 [features]
 default = []
