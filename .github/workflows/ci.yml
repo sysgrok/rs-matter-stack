@@ -54,4 +54,28 @@ jobs:
 
       - name: Examples
         if: matrix.features == 'os'
-        run: cargo build --examples --features ${{matrix.features}},nix,log,examples
+        run: cargo build --release --examples --features ${{matrix.features}},nix,log,examples
+
+      - name: Set up environment for size reports
+        uses: ./.github/actions/setup-size-reports
+        if: ${{ !env.ACT && matrix.features == 'os' }}
+        with:
+          gh-context: ${{ toJson(github) }}
+
+      - name: Prepare bloat report from the previous builds
+        if: matrix.features == 'os'
+        run: |
+            python .github/scripts/memory/gh_sizes.py \
+              light infologs-optz-ltofat x86_64-unknown-linux-gnu \
+              target/release/examples/light \
+              /tmp/bloat_reports/
+            python .github/scripts/memory/gh_sizes.py \
+              light_eth infologs-optz-ltofat x86_64-unknown-linux-gnu \
+              target/release/examples/light_eth \
+              /tmp/bloat_reports/
+
+      - name: Uploading Size Reports
+        uses: ./.github/actions/upload-size-reports
+        if: ${{ !env.ACT }}
+        with:
+          platform-name: cross-platform
