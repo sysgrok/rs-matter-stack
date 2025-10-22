@@ -27,23 +27,23 @@ The core of `rs-matter-stack` is `no_std` and no-`alloc`.
 You need to provide platform-specific implementations of the following traits for your embedded platform:
 - `KvBlobStore` - non-volatile key-value storage abstraction.
   - For STD, `rs-matter-stack` provides `DirKvBlobStore`.
-- `Netif` - network interface abstraction (i.e. monitoring when the network interface is up or down, and what is its IP configuration).
-  - For Unix-like OSes, `rs-matter-stack` provides `UnixNetif`, which uses a simple polling every 2 seconds to detect changes to the network interface.
+- `NetifDiag` - network interface abstraction (i.e. monitoring when the network interface is up or down, and what is its IP configuration).
+  - For Unix-like OSes, `rs-matter` provides `UnixNetifs`, which uses a simple polling every 2 seconds to detect changes to the network interface.
   - Note that For IP (TCP & UDP) IO, the stack uses the [`edge-nal`](https://github.com/ivmarkov/edge-net/tree/master/edge-nal) crate, and is thus compatible with [`STD`](https://github.com/ivmarkov/edge-net/tree/master/edge-nal-std) and [`Embassy`](https://github.com/ivmarkov/edge-net/tree/master/edge-nal-embassy) out of the box. You only need to worry about networking IO if you use other platforms than these two.
 - Implementation of the UDP traits from [edge-nal](https://github.com/ivmarkov/edge-net/tree/master/edge-nal).
   - There are out-of-the-box implementations for [Rust STD BSD sockets](https://github.com/ivmarkov/edge-net/tree/master/edge-nal-std) as well as for [`embassy-net`](https://github.com/ivmarkov/edge-net/tree/master/edge-nal-embassy) and for [OpenThread](https://github.com/ivmarkov/esp-openthread/blob/main/openthread/src/enal.rs).
-- `Gatt` - BLE GATT peripheral abstraction of the device radio. Not necessary for Ethernet connectivity
-  - For Linux, `rs-matter-stack` provides `BuiltinBle`, which uses the Linux BlueZ BT stack.
-- `Controller` - Wifi controller implementation when using Wifi connectivity (Thread has a built-in one in OpenThread).
-  - `DisconnectedController` is a no-op wireless implementation of a Wifi controller that is useful for testing. I.e. on Linux, one can use `PreexistingWireless` + `DisconnectedController` together with `BuiltinBle` and `UnixNetif` to test the stack in wireless mode. For production embedded Linux use-cases, you'll have to provide a true `Controller` implementation, possibly based on WPA Supplicant, or NetworkManager (not available out of the box in `rs-matter-stack` yet).
+- `GattPeripheral` - BLE GATT peripheral abstraction of the device radio. Not necessary for Ethernet connectivity
+  - For Linux, `rs-matter` provides `BluerGattPeripheral`, which uses the Linux BlueZ BT stack.
+- `NetCtl` - Wifi controller implementation when using Wifi connectivity (Thread has a built-in one in OpenThread).
+  - `NoopWirelessNetCtl` is a no-op wireless implementation of a Wifi controller that is useful for testing. I.e. on Linux, one can use `PreexistingWireless` + `NoopWirelessNetCtl` together with `BluerGattPeripheral` and `UnixNetifs` to test the stack in wireless mode. For production embedded Linux use-cases, you'll have to provide a true `NetCtl` implementation, possibly based on WPA Supplicant, or NetworkManager (which **are** in the meantime both available from upstream `rs-matter`).
 
 ## Embassy
 
-The [`rs-matter-embassy`](https://github.com/ivmarkov/rs-matter-embassy) crate provides implementations for `KvBlobStore`, `Netif`, `Gatt` and others for the [`embassy`](https://github.com/embassy-rs/embassy) framework.
+The [`rs-matter-embassy`](https://github.com/ivmarkov/rs-matter-embassy) crate provides implementations for `KvBlobStore`, `NetifDiag`, `NetCtl`, `GattPeripheral` and others for the [`embassy`](https://github.com/embassy-rs/embassy) framework.
 
 ## ESP-IDF
 
-The [`esp-idf-matter`](https://github.com/ivmarkov/esp-idf-matter) crate provides implementations for `KvBlobStore`, `Netif`, `Gatt` and others for the [ESP-IDF SDK](https://github.com/esp-rs/esp-idf-svc).
+The [`esp-idf-matter`](https://github.com/ivmarkov/esp-idf-matter) crate provides implementations for `KvBlobStore`, `NetifDiag`, `GattPeripheral` and others for the [ESP-IDF SDK](https://github.com/esp-rs/esp-idf-svc).
 
 ## Example
 
