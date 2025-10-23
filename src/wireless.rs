@@ -157,17 +157,6 @@ where
     T: WirelessNetwork,
     E: Embedding + 'static,
 {
-    /// Reset the Matter instance to the factory defaults putting it into a
-    /// Commissionable mode.
-    pub fn reset(&self) -> Result<(), Error> {
-        // TODO: Reset fabrics and ACLs
-        // TODO self.network.btp_gatt_context.reset()?;
-        // TODO self.network.btp_context.reset();
-        self.network.networks.reset();
-
-        Ok(())
-    }
-
     async fn run_net_coex<S, N, D, C, G>(
         &'static self,
         net_stack: S,

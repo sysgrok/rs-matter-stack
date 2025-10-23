@@ -45,7 +45,7 @@ where
     }
 
     /// Reset the persist instance, removing all stored data from the non-volatile storage
-    /// as well as removing all ACLs, fabrics and Wifi networks from the Matter stack.
+    /// as well as removing all ACLs, fabrics and wireless networks from the Matter stack.
     pub async fn reset(&self) -> Result<(), Error> {
         let (mut kv, mut buf) = self.store.get().await;
 
@@ -53,9 +53,10 @@ where
         kv.remove(MatterStackKey::BasicInfo as _, &mut buf).await?;
         kv.remove(MatterStackKey::Networks as _, &mut buf).await?;
 
-        self.networks.reset()?;
+        self.matter.reset_persist(false);
+        self.networks.reset(false);
 
-        Ok(())
+        self.matter.reset_transport()
     }
 
     /// Load the Matter stack from the non-volatile storage.
@@ -151,7 +152,7 @@ where
 /// - `&NetworkContext` - which is used with the `WirelessBle` network.
 pub trait NetworkPersist: Sealed {
     /// Reset all networks, removing all stored data from the memory
-    fn reset(&self) -> Result<(), Error>;
+    fn reset(&self, flag_changed: bool);
 
     /// Load the networks from the provided data BLOB
     fn load(&self, data: &[u8]) -> Result<(), Error>;
@@ -181,10 +182,8 @@ where
     M: RawMutex,
     T: WirelessNetwork,
 {
-    fn reset(&self) -> Result<(), Error> {
-        WirelessNetworks::reset(self);
-
-        Ok(())
+    fn reset(&self, flag_changed: bool) {
+        WirelessNetworks::reset(self, flag_changed);
     }
 
     fn load(&self, data: &[u8]) -> Result<(), Error> {
@@ -209,9 +208,7 @@ where
 /// Used when the Matter stack is configured for Ethernet, as in that case
 /// there is no network state that needs to be saved
 impl NetworkPersist for () {
-    fn reset(&self) -> Result<(), Error> {
-        Ok(())
-    }
+    fn reset(&self, _flag_changed: bool) {}
 
     fn load(&self, _data: &[u8]) -> Result<(), Error> {
         Ok(())
