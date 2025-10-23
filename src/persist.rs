@@ -45,7 +45,7 @@ where
     }
 
     /// Reset the persist instance, removing all stored data from the non-volatile storage
-    /// as well as removing all ACLs, fabrics and Wifi networks from the Matter stack.
+    /// as well as removing all ACLs, fabrics and wireless networks from the Matter stack.
     pub async fn reset(&self) -> Result<(), Error> {
         let (mut kv, mut buf) = self.store.get().await;
 
@@ -53,6 +53,8 @@ where
         kv.remove(MatterStackKey::BasicInfo as _, &mut buf).await?;
         kv.remove(MatterStackKey::Networks as _, &mut buf).await?;
 
+        self.matter.reset_fabrics();
+        self.matter.reset_basic_info();
         self.networks.reset()?;
 
         Ok(())
