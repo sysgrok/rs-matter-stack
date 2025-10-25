@@ -20,6 +20,19 @@ on:
 permissions:
   issues: write
   pull-requests: write
+  actions: write
+  attestations: write
+  checks: write
+  contents: write
+  deployments: write
+  discussions: write
+  metadata: read
+  models: read
+  packages: write
+  pages: write
+  repository-projects: write
+  security-events: write
+  statuses: write
 
 concurrency:
   group: ${{ github.workflow }}
