@@ -26,7 +26,6 @@ permissions:
   contents: write
   deployments: write
   discussions: write
-  metadata: read
   models: read
   packages: write
   pages: write
