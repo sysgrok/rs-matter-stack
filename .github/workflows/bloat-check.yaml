@@ -19,6 +19,7 @@ on:
   - cron: "*/5 * * * *"
 permissions:
   issues: write
+  pull-requests: write
 
 concurrency:
   group: ${{ github.workflow }}
