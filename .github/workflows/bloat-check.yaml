@@ -60,6 +60,7 @@ jobs:
       run: |
         python .github/scripts/memory/gh_report.py \
           --verbose \
+          --log-level debug \
           --report-increases 0.2 \
           --report-pr \
           --github-comment \
