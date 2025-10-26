@@ -20,18 +20,18 @@ on:
 permissions:
   issues: write
   pull-requests: write
-  actions: write
-  attestations: write
-  checks: write
-  contents: write
-  deployments: write
-  discussions: write
-  models: read
-  packages: write
-  pages: write
-  repository-projects: write
-  security-events: write
-  statuses: write
+#  actions: write
+#  attestations: write
+#  checks: write
+#  contents: write
+#  deployments: write
+#  discussions: write
+#  models: read
+#  packages: write
+#  pages: write
+#  repository-projects: write
+#  security-events: write
+#  statuses: write
 
 concurrency:
   group: ${{ github.workflow }}
@@ -60,7 +60,6 @@ jobs:
       run: |
         python .github/scripts/memory/gh_report.py \
           --verbose \
-          --log-level debug \
           --report-increases 0.2 \
           --report-pr \
           --github-comment \
