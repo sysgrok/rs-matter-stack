@@ -26,7 +26,7 @@ jobs:
         uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-          components: rustfmt, clippy, rust-src
+          components: rustfmt, clippy, rust-src, miri
 
       - name: Install libdbus
         run: sudo apt-get install -y libdbus-1-dev
@@ -51,6 +51,18 @@ jobs:
 
       - name: Build
         run: cargo build --no-default-features --features ${{matrix.features}}
+
+      - name: Test
+        if: matrix.features == 'std'
+        run: cargo test --features ${{matrix.features}}
+
+      - name: Miri Setup
+        if: matrix.features == 'std'
+        run: cargo miri setup
+
+      - name: Miri Test
+        if: matrix.features == 'std'
+        run: cargo miri test --features ${{matrix.features}}
 
       - name: Examples
         if: matrix.features == 'os'

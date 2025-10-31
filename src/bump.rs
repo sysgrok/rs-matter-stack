@@ -6,10 +6,9 @@
 //! The primary use case of this allocator is reduction of Rust future sizes, due to
 //! `rustc` not being very intelligent w.r.t. stack usage in async functions.
 
-use core::marker::PhantomData;
-use core::mem::MaybeUninit;
+use core::mem::{self, MaybeUninit};
 use core::pin::Pin;
-use core::ptr::NonNull;
+use core::slice;
 
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use rs_matter::utils::cell::RefCell;
@@ -102,48 +101,45 @@ impl<const N: usize, M: RawMutex> Bump<N, M> {
         T: Sized,
     {
         self.inner.lock(|inner| {
+            // SAFETY:
+            // The idea is to have a large chunk of memory allocated on the stack,
+            // with this function one can reserve a chunk of that memory for an object
+            // of type T.
+            //
+            // To reserve the memory, it will move the offset forward by the size required
+            // for T, and return a **mutable** reference to it.
+            //
+            // Given that it returns a mutable reference to it, there cannot be any other
+            // references to that memory location. This is ensured by the offset.
+
+            let size = mem::size_of_val(&object);
+
             let mut inner = inner.borrow_mut();
-
-            let size = core::mem::size_of_val(&object);
-
             let offset = inner.offset;
-            let memory = unsafe { inner.memory.assume_init_mut() };
 
             info!(
                 "BUMP[{}]: {}b (U:{}b/F:{}b)",
                 location,
                 size,
                 offset,
-                memory.len() - offset
+                inner.memory.len() - offset
             );
 
-            let remaining = &mut memory[offset..];
-            let remaining_len = remaining.len();
+            // SAFETY: The lifetime of the returned reference is bound to &self -> it will not outlive the data it is borrowing.
+            let value = unsafe {
+                let t_buf = inner.allocate_for::<T>(1);
 
-            let (t_buf, r_buf) = align_min::<T>(remaining, 1);
-
-            // Safety: We just allocated the memory and it's properly aligned
-            let ptr = unsafe {
-                let ptr = t_buf.as_ptr() as *mut T;
-                ptr.write(object);
-
-                NonNull::new_unchecked(ptr)
+                t_buf[0].write(object)
             };
 
-            inner.offset += remaining_len - r_buf.len();
-
-            BumpBox {
-                ptr,
-                _allocator: PhantomData,
-            }
+            BumpBox { value }
         })
     }
 }
 
 /// A box-like container that uses bump allocation
 pub struct BumpBox<'a, T> {
-    ptr: NonNull<T>,
-    _allocator: core::marker::PhantomData<&'a ()>,
+    value: &'a mut T,
 }
 
 impl<T> BumpBox<'_, T> {
@@ -160,36 +156,27 @@ impl<T> core::ops::Deref for BumpBox<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        unsafe { self.ptr.as_ref() }
+        self.value
     }
 }
 
 impl<T> core::ops::DerefMut for BumpBox<'_, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { self.ptr.as_mut() }
+        self.value
     }
 }
 
 impl<T> Unpin for BumpBox<'_, T> {}
 
-impl<T> Drop for BumpBox<'_, T> {
-    fn drop(&mut self) {
-        // Safety: The pointer is valid and we own the data
-        unsafe {
-            self.ptr.as_ptr().drop_in_place();
-        }
-    }
-}
-
 struct Inner<const N: usize> {
-    memory: MaybeUninit<[u8; N]>,
+    memory: [MaybeUninit<u8>; N],
     offset: usize,
 }
 
 impl<const N: usize> Inner<N> {
     const fn new() -> Self {
         Self {
-            memory: MaybeUninit::uninit(),
+            memory: [const { MaybeUninit::uninit() }; N],
             offset: 0,
         }
     }
@@ -200,10 +187,47 @@ impl<const N: usize> Inner<N> {
             offset: 0,
         })
     }
+
+    /// Allocate space for `count` objects of type `T`
+    ///
+    /// # Panics
+    ///
+    /// If there is not enough memory left in the bump allocator to
+    /// allocate the requested objects.
+    ///
+    /// # Safety
+    ///
+    /// This function returns a mutable reference to the allocated memory
+    /// that lives independently of the lifetime of `self`.
+    /// This could result in undefined behavior where the reference outlives
+    /// the bump allocator itself.
+    ///
+    /// The caller must ensure that the returned reference does not outlive
+    /// the bump allocator.
+    unsafe fn allocate_for<'s, 'b, T>(&'s mut self, count: usize) -> &'b mut [MaybeUninit<T>] {
+        // We can only use the memory from the current offset onwards, because
+        // the previous memory might be in use by previously allocated objects.
+        let remaining = &mut self.memory[self.offset..];
+        let remaining_len = remaining.len();
+        // The t_buf will be where the caller can place their objects,
+        // and r_buf should be the remaining unused memory.
+        let (t_buf, r_buf) = align_min::<T>(remaining, count);
+        self.offset += remaining_len - r_buf.len();
+
+        // This creates an unbounded lifetime, see the safety section of this function.
+        //
+        // It is necessary, because technically only one mutable reference can exist
+        // to self.memory, but because it is an array, the mutable reference to self.memory
+        // can be split into multiple mutable references to its parts.
+        slice::from_raw_parts_mut(t_buf.as_mut_ptr(), t_buf.len())
+    }
 }
 
-fn align_min<T>(buf: &mut [u8], count: usize) -> (&mut [MaybeUninit<T>], &mut [u8]) {
-    if count == 0 || core::mem::size_of::<T>() == 0 {
+fn align_min<T>(
+    buf: &mut [MaybeUninit<u8>],
+    count: usize,
+) -> (&mut [MaybeUninit<T>], &mut [MaybeUninit<u8>]) {
+    if count == 0 || mem::size_of::<T>() == 0 {
         return (&mut [], buf);
     }
 
@@ -215,7 +239,7 @@ fn align_min<T>(buf: &mut [u8], count: usize) -> (&mut [MaybeUninit<T>], &mut [u
     // Shrink `t_buf` to the number of requested items (count)
     let t_buf = &mut t_buf[..count];
     let t_leading_buf0_len = t_leading_buf0.len();
-    let t_buf_size = core::mem::size_of_val(t_buf);
+    let t_buf_size = mem::size_of_val(t_buf);
 
     let (buf0, remaining_buf) = buf.split_at_mut(t_leading_buf0_len + t_buf_size);
 
@@ -225,4 +249,40 @@ fn align_min<T>(buf: &mut [u8], count: usize) -> (&mut [MaybeUninit<T>], &mut [u
     assert!(t_remaining_buf.is_empty());
 
     (t_buf, remaining_buf)
+}
+
+#[cfg(all(test, feature = "std"))]
+mod tests {
+    use super::*;
+
+    use alloc::vec::Vec;
+    use rs_matter::utils::sync::blocking::raw::StdRawMutex;
+
+    const BUMP_SIZE: usize = 1024;
+    const DEFAULT_VALUE: u32 = 0xDEADBEEF;
+
+    #[test]
+    fn test_one_concurrent_borrow() {
+        static BUMP: Bump<BUMP_SIZE, StdRawMutex> = Bump::new();
+
+        for _ in 0..(BUMP_SIZE / mem::size_of_val(&DEFAULT_VALUE)) {
+            let b1 = BUMP.alloc(DEFAULT_VALUE, "test1");
+
+            assert_eq!(*b1, DEFAULT_VALUE);
+        }
+    }
+
+    #[test]
+    fn test_multiple_concurrent_borrow() {
+        static BUMP: Bump<BUMP_SIZE, StdRawMutex> = Bump::new();
+
+        let mut all_boxes = Vec::new();
+        for i in 0..(BUMP_SIZE / mem::size_of::<usize>()) {
+            all_boxes.push(alloc!(BUMP, i));
+        }
+
+        for (i, b) in all_boxes.into_iter().enumerate() {
+            assert_eq!(*b, i);
+        }
+    }
 }
