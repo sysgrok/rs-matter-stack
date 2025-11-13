@@ -6,8 +6,10 @@
 //! The primary use case of this allocator is reduction of Rust future sizes, due to
 //! `rustc` not being very intelligent w.r.t. stack usage in async functions.
 
+use core::marker::PhantomData;
 use core::mem::{self, MaybeUninit};
 use core::pin::Pin;
+use core::ptr::NonNull;
 use core::slice;
 
 use embassy_sync::blocking_mutex::raw::RawMutex;
@@ -126,20 +128,26 @@ impl<const N: usize, M: RawMutex> Bump<N, M> {
             );
 
             // SAFETY: The lifetime of the returned reference is bound to &self -> it will not outlive the data it is borrowing.
-            let value = unsafe {
+            let ptr = unsafe {
                 let t_buf = inner.allocate_for::<T>(1);
 
-                t_buf[0].write(object)
+                t_buf[0].write(object);
+
+                NonNull::new_unchecked(t_buf[0].as_mut_ptr())
             };
 
-            BumpBox { value }
+            BumpBox {
+                ptr,
+                _allocator: PhantomData,
+            }
         })
     }
 }
 
 /// A box-like container that uses bump allocation
 pub struct BumpBox<'a, T> {
-    value: &'a mut T,
+    ptr: NonNull<T>,
+    _allocator: PhantomData<&'a ()>,
 }
 
 impl<T> BumpBox<'_, T> {
@@ -156,17 +164,26 @@ impl<T> core::ops::Deref for BumpBox<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        self.value
+        unsafe { self.ptr.as_ref() }
     }
 }
 
 impl<T> core::ops::DerefMut for BumpBox<'_, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.value
+        unsafe { self.ptr.as_mut() }
     }
 }
 
 impl<T> Unpin for BumpBox<'_, T> {}
+
+impl<T> Drop for BumpBox<'_, T> {
+    fn drop(&mut self) {
+        // Safety: The pointer is valid and we own the data
+        unsafe {
+            self.ptr.as_ptr().drop_in_place();
+        }
+    }
+}
 
 struct Inner<const N: usize> {
     memory: [MaybeUninit<u8>; N],
