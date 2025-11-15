@@ -26,7 +26,7 @@ jobs:
         uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-          components: rustfmt, clippy, rust-src, miri
+          components: rustfmt, clippy, rust-src
 
       - name: Install libdbus
         run: sudo apt-get install -y libdbus-1-dev
@@ -56,14 +56,6 @@ jobs:
         if: matrix.features == 'std'
         run: cargo test --features ${{matrix.features}}
 
-      - name: Miri Setup
-        if: matrix.features == 'std'
-        run: cargo miri setup
-
-      - name: Miri Test
-        if: matrix.features == 'std'
-        run: cargo miri test --features ${{matrix.features}}
-
       - name: Examples
         if: matrix.features == 'os'
         run: cargo build --release --examples --features ${{matrix.features}},nix,log,examples
@@ -91,3 +83,32 @@ jobs:
         if: ${{ !env.ACT && matrix.features == 'os' }}
         with:
           platform-name: cross-platform
+
+  run_miri:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        features: ['std']
+
+    steps:
+      - name: Rust
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+
+      - name: Install libdbus
+        run: sudo apt-get install -y libdbus-1-dev
+
+      - name: Install libavahi-client
+        run: sudo apt-get install -y libavahi-client-dev
+
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Miri Setup
+        if: matrix.features == 'std'
+        run: cargo miri setup
+
+      - name: Miri Test
+        if: matrix.features == 'std'
+        run: cargo miri test --features ${{matrix.features}}
