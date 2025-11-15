@@ -10,7 +10,6 @@ use core::marker::PhantomData;
 use core::mem::{self, MaybeUninit};
 use core::pin::Pin;
 use core::ptr::NonNull;
-use core::slice;
 
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use rs_matter::utils::cell::RefCell;
@@ -124,20 +123,16 @@ impl<const N: usize, M: RawMutex> Bump<N, M> {
                 location,
                 size,
                 offset,
-                inner.memory.len() - offset
+                inner.len() - offset
             );
 
-            // SAFETY: The lifetime of the returned reference is bound to &self -> it will not outlive the data it is borrowing.
-            let ptr = unsafe {
-                let t_buf = inner.allocate_for::<T>(1);
+            let value = inner.allocate::<T>();
 
-                t_buf[0].write(object);
-
-                NonNull::new_unchecked(t_buf[0].as_mut_ptr())
-            };
+            value.write(object);
 
             BumpBox {
-                ptr,
+                // SAFETY: The code above wrote to the memory location -> it can not be null
+                ptr: unsafe { NonNull::new_unchecked(value.as_mut_ptr()) },
                 _allocator: PhantomData,
             }
         })
@@ -186,14 +181,29 @@ impl<T> Drop for BumpBox<'_, T> {
 }
 
 struct Inner<const N: usize> {
-    memory: [MaybeUninit<u8>; N],
+    // It is uncertain whether a [MaybeUninit<u8>; N] initialized with [const { MaybeUninit::uninit() }; N]
+    // would never be temporarily allocated on the stack and then moved to the final destination.
+    //
+    // In addition to that, the const { MaybeUninit::uninit() } sometimes results in bad optimizations like
+    // https://stackoverflow.com/questions/79513440.
+    // With the 1.77 compiler target, this issue would still be present, and const expressions only got
+    // stabilized in 1.79 -> not available.
+    //
+    // To avoid this, the entire array is wrapped in a MaybeUninit, which should prevent the compiler from
+    // trying to eagerly initialize the array on the stack.
+    //
+    // Technically it is enough to have MaybeUninit<[u8; N]> and then transmute it to [MaybeUninit<u8>; N]
+    // (which is safe to do), but this would require a transmute that is easy to get wrong.
+    // Using MaybeUninit<[MaybeUninit<u8>; N]> does not have any downsides and one can just use assume_init
+    // or assume_init_mut to get the [MaybeUninit<u8>; N] directly.
+    memory: MaybeUninit<[MaybeUninit<u8>; N]>,
     offset: usize,
 }
 
 impl<const N: usize> Inner<N> {
     const fn new() -> Self {
         Self {
-            memory: [const { MaybeUninit::uninit() }; N],
+            memory: MaybeUninit::uninit(),
             offset: 0,
         }
     }
@@ -205,38 +215,31 @@ impl<const N: usize> Inner<N> {
         })
     }
 
-    /// Allocate space for `count` objects of type `T`
+    fn len(&self) -> usize {
+        N
+    }
+
+    /// Allocate space for an object of type `T`
     ///
     /// # Panics
     ///
     /// If there is not enough memory left in the bump allocator to
     /// allocate the requested objects.
-    ///
-    /// # Safety
-    ///
-    /// This function returns a mutable reference to the allocated memory
-    /// that lives independently of the lifetime of `self`.
-    /// This could result in undefined behavior where the reference outlives
-    /// the bump allocator itself.
-    ///
-    /// The caller must ensure that the returned reference does not outlive
-    /// the bump allocator.
-    unsafe fn allocate_for<'s, 'b, T>(&'s mut self, count: usize) -> &'b mut [MaybeUninit<T>] {
+    fn allocate<T>(&mut self) -> &mut MaybeUninit<T> {
+        // SAFETY: This is safe because the type we are claiming to have initialized,
+        //         is a bunch of `MaybeUninit`s, which do not require initialization.
+        let data: &mut [MaybeUninit<u8>; N] = unsafe { self.memory.assume_init_mut() };
+
         // We can only use the memory from the current offset onwards, because
         // the previous memory might be in use by previously allocated objects.
-        let remaining = &mut self.memory[self.offset..];
+        let remaining = &mut data[self.offset..];
         let remaining_len = remaining.len();
         // The t_buf will be where the caller can place their objects,
         // and r_buf should be the remaining unused memory.
-        let (t_buf, r_buf) = align_min::<T>(remaining, count);
+        let (t_buf, r_buf) = align_min::<T>(remaining, 1);
         self.offset += remaining_len - r_buf.len();
 
-        // This creates an unbounded lifetime, see the safety section of this function.
-        //
-        // It is necessary, because technically only one mutable reference can exist
-        // to self.memory, but because it is an array, the mutable reference to self.memory
-        // can be split into multiple mutable references to its parts.
-        slice::from_raw_parts_mut(t_buf.as_mut_ptr(), t_buf.len())
+        &mut t_buf[0]
     }
 }
 
