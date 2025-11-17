@@ -163,7 +163,7 @@ rustcrypto = ["rs-matter/rustcrypto"]
 os = ["backtrace", "rs-matter/os", "rustcrypto", "embassy-time/std"]
 backtrace = ["std", "rs-matter/backtrace"]
 async-io-mini = ["std", "edge-nal-std/async-io-mini"]
-std = ["alloc", "rs-matter/std", "edge-nal-std"]
+std = ["alloc", "rs-matter/std", "edge-nal-std", "critical-section/std"]
 alloc = ["embedded-svc/alloc"]
 examples = ["log", "os", "nix", "embassy-time-queue-utils/generic-queue-64", "zeroconf"]
 
@@ -191,6 +191,7 @@ bitflags = "2"
 nix = { version = "0.27", features = ["net"], optional = true }
 
 [dev-dependencies]
+critical-section = "1.0"
 static_cell = "2.1"
 futures-lite = "1"
 async-compat = "0.2"
