@@ -29,7 +29,7 @@ use rs_matter::dm::clusters::dev_att::DevAttDataFetcher;
 use rs_matter::dm::clusters::gen_diag::NetifDiag;
 use rs_matter::dm::networks::NetChangeNotif;
 use rs_matter::dm::subscriptions::Subscriptions;
-use rs_matter::dm::{AsyncHandler, AsyncMetadata, ClusterId, DataModel, EndptId, IMBuffer};
+use rs_matter::dm::{AsyncHandler, AsyncMetadata, AttrId, ClusterId, DataModel, EndptId, IMBuffer};
 use rs_matter::error::{Error, ErrorCode};
 use rs_matter::pairing::qr::QrTextType;
 use rs_matter::respond::{DefaultResponder, ExchangeHandler, Responder};
@@ -382,9 +382,9 @@ where
     }
 
     /// Notifies the Matter instance that there is a change in the state
-    /// of one of the clusters.
+    /// of one of the clusters' attributes.
     ///
-    /// User is expected to call this method when a user-provided cluster
+    /// User is expected to call this method when a user-provided cluster attribute
     /// changes its state.
     ///
     /// This is necessary so as the Matter instance can notify clients
@@ -393,9 +393,15 @@ where
     /// # Arguments
     /// - `endpoint_id` - the endpoint ID where the cluster is located
     /// - `cluster_id` - the ID of the cluster that has changed
-    pub fn notify_cluster_changed(&self, endpoint_id: EndptId, cluster_id: ClusterId) {
+    /// - `attr_id` - the ID of the attribute that has changed
+    pub fn notify_attribute_changed(
+        &self,
+        endpoint_id: EndptId,
+        cluster_id: ClusterId,
+        attr_id: AttrId,
+    ) {
         self.subscriptions
-            .notify_cluster_changed(endpoint_id, cluster_id);
+            .notify_attribute_changed(endpoint_id, cluster_id, attr_id);
     }
 
     // /// User code hook to get the state of the netif passed to the
