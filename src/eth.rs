@@ -2,6 +2,7 @@ use core::future::Future;
 
 use embassy_futures::select::{select, select4};
 
+use rs_matter::crypto::{Crypto, RngCore};
 use rs_matter::dm::clusters::gen_comm::CommPolicy;
 use rs_matter::dm::clusters::gen_diag::{GenDiag, NetifDiag};
 use rs_matter::dm::clusters::net_comm::NetworkType;
@@ -167,13 +168,14 @@ where
         gen_diag: &'a dyn GenDiag,
         comm_policy: &'a dyn CommPolicy,
         netif_diag: &'a dyn NetifDiag,
+        rand: impl RngCore + Copy,
         handler: H,
     ) -> EthHandler<'a, SysHandler<'a, H>> {
         with_eth(
             gen_diag,
             netif_diag,
-            self.matter().rand(),
-            with_sys(comm_policy, self.matter().rand(), handler),
+            rand,
+            with_sys(comm_policy, rand, handler),
         )
     }
 
@@ -187,19 +189,22 @@ where
 
     /// Run the Matter stack for a pre-existing Ethernet network.
     ///
-    /// Parameters:
+    /// # Arguments
     /// - `net_stack` - a user-provided network stack implementation
     /// - `netif` - a user-provided `Netif` implementation for the Ethernet network
     /// - `mdns` - a user-provided mDNS implementation
     /// - `persist` - an `EthMatterPersist` implementation instantiated on the stack with `create_persist`
+    /// - `crypto` - a user-provided crypto implementation
     /// - `handler` - a user-provided DM handler implementation
     /// - `user` - a user-provided future that will be polled only when the netif interface is up
-    pub fn run_preex<'t, U, N, M, S, H, X>(
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_preex<'t, U, N, M, S, C, H, X>(
         &'t self,
         net_stack: U,
         netif: N,
         mdns: M,
         persist: &'t EthMatterPersist<'_, S>,
+        crypto: C,
         handler: H,
         user: X,
     ) -> impl Future<Output = Result<(), Error>> + 't
@@ -208,12 +213,14 @@ where
         N: NetifDiag + NetChangeNotif + 't,
         M: Mdns + 't,
         S: KvBlobStore + 't,
+        C: Crypto + 't,
         H: AsyncHandler + AsyncMetadata + 't,
         X: UserTask + 't,
     {
         self.run(
             PreexistingEthernet::new(net_stack, netif, mdns),
             persist,
+            crypto,
             handler,
             user,
         )
@@ -221,21 +228,24 @@ where
 
     /// Run the Matter stack for an Ethernet network.
     ///
-    /// Parameters:
+    /// # Arguments
     /// - `ethernet` - a user-provided `Ethernet` implementation
     /// - `persist` - an `EthMatterPersist` implementation instantiated on the stack with `create_persist`
+    /// - `crypto` - a user-provided crypto implementation
     /// - `handler` - a user-provided DM handler implementation
     /// - `user` - a user-provided future that will be polled only when the netif interface is up
-    pub async fn run<N, S, H, X>(
+    pub async fn run<N, S, C, H, X>(
         &self,
         mut ethernet: N,
         persist: &EthMatterPersist<'_, S>,
+        crypto: C,
         handler: H,
         user: X,
     ) -> Result<(), Error>
     where
         N: Ethernet,
         S: KvBlobStore,
+        C: Crypto,
         H: AsyncHandler + AsyncMetadata,
         X: UserTask,
     {
@@ -251,52 +261,77 @@ where
 
         self.matter().reset_transport()?;
 
-        let mut net_task = pin_alloc!(self.bump, self.run_ethernet(&mut ethernet, handler, user));
+        let mut net_task = pin_alloc!(
+            self.bump,
+            self.run_ethernet(&mut ethernet, crypto, handler, user)
+        );
         let mut persist_task = pin_alloc!(self.bump, self.run_psm(persist));
 
         select(&mut net_task, &mut persist_task).coalesce().await
     }
 
-    fn run_ethernet<'t, N, H, X>(
+    fn run_ethernet<'t, N, C, H, X>(
         &'t self,
         ethernet: &'t mut N,
+        crypto: C,
         handler: H,
         user: X,
     ) -> impl Future<Output = Result<(), Error>> + 't
     where
         N: Ethernet + 't,
+        C: Crypto + 't,
         H: AsyncHandler + AsyncMetadata + 't,
         X: UserTask + 't,
     {
-        Ethernet::run(ethernet, MatterStackEthernetTask(self, handler, user))
+        Ethernet::run(
+            ethernet,
+            MatterStackEthernetTask {
+                stack: self,
+                crypto,
+                handler,
+                user_task: user,
+            },
+        )
     }
 }
 
-struct MatterStackEthernetTask<'a, const B: usize, E, H, X>(&'a MatterStack<'a, B, Eth<E>>, H, X)
+struct MatterStackEthernetTask<'a, const B: usize, E, C, H, X>
 where
     E: Embedding + 'static,
-    H: AsyncMetadata + AsyncHandler,
-    X: UserTask;
-
-impl<const B: usize, E, H, X> EthernetTask for MatterStackEthernetTask<'_, B, E, H, X>
-where
-    E: Embedding + 'static,
+    C: Crypto,
     H: AsyncMetadata + AsyncHandler,
     X: UserTask,
 {
-    async fn run<S, C, M>(&mut self, net_stack: S, netif: C, mut mdns: M) -> Result<(), Error>
+    stack: &'a MatterStack<'a, B, Eth<E>>,
+    crypto: C,
+    handler: H,
+    user_task: X,
+}
+
+impl<const B: usize, E, C, H, X> EthernetTask for MatterStackEthernetTask<'_, B, E, C, H, X>
+where
+    E: Embedding + 'static,
+    C: Crypto,
+    H: AsyncMetadata + AsyncHandler,
+    X: UserTask,
+{
+    async fn run<S, I, M>(&mut self, net_stack: S, netif: I, mut mdns: M) -> Result<(), Error>
     where
         S: NetStack,
-        C: NetifDiag + NetChangeNotif,
+        I: NetifDiag + NetChangeNotif,
         M: Mdns,
     {
         info!("Ethernet driver started");
 
-        let handler = self.0.root_handler(&(), &true, &netif, &self.1);
+        let handler =
+            self.stack
+                .root_handler(&(), &true, &netif, self.crypto.weak_rand()?, &self.handler);
+        let dm = self.stack.dm(&self.crypto, (&self.handler, handler));
 
         let mut net_task = pin_alloc!(
-            self.0.bump,
-            self.0.run_oper_net(
+            self.stack.bump,
+            self.stack.run_oper_net(
+                &self.crypto,
                 &net_stack,
                 core::future::pending(),
                 Option::<(NoNetwork, NoNetwork)>::None,
@@ -304,24 +339,17 @@ where
         );
 
         let mut mdns_task = pin_alloc!(
-            self.0.bump,
-            self.0.run_oper_netif_mdns(&net_stack, &netif, &mut mdns)
+            self.stack.bump,
+            self.stack
+                .run_oper_netif_mdns(&self.crypto, &dm, &net_stack, &netif, &mut mdns)
         );
 
-        let mut handler_task = pin_alloc!(
-            self.0.bump,
-            self.0.run_handler_with_bump((&self.1, handler))
-        );
+        let mut dm_task = pin_alloc!(self.stack.bump, self.stack.run_dm_with_bump(&dm));
 
-        let mut user_task = pin_alloc!(self.0.bump, self.2.run(&net_stack, &netif));
+        let mut user_task = pin_alloc!(self.stack.bump, self.user_task.run(&net_stack, &netif));
 
-        select4(
-            &mut net_task,
-            &mut mdns_task,
-            &mut handler_task,
-            &mut user_task,
-        )
-        .coalesce()
-        .await
+        select4(&mut net_task, &mut mdns_task, &mut dm_task, &mut user_task)
+            .coalesce()
+            .await
     }
 }

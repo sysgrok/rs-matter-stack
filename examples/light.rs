@@ -10,10 +10,13 @@
 
 use core::pin::pin;
 
+use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use log::info;
 
+use rs_matter::crypto::{default_crypto, Crypto};
 use rs_matter::dm::clusters::on_off::test::TestOnOffDeviceLogic;
 use rs_matter::dm::clusters::on_off::OnOffHooks;
+use rs_matter::dm::devices::test::DAC_PRIVKEY;
 use rs_matter_stack::matter::dm::clusters::desc::{ClusterHandler as _, DescHandler};
 use rs_matter_stack::matter::dm::clusters::net_comm::NetworkType;
 use rs_matter_stack::matter::dm::clusters::on_off;
@@ -64,10 +67,15 @@ fn main() -> Result<(), Error> {
             &TEST_DEV_ATT,
         ));
 
+    // The default crypto provider
+    let crypto = default_crypto::<NoopRawMutex, _>(rand::thread_rng(), DAC_PRIVKEY);
+
+    let mut rand = crypto.weak_rand()?;
+
     // Our "light" on-off cluster.
     // It will toggle the light state every 5 seconds
     let on_off = on_off::OnOffHandler::new_standalone(
-        Dataver::new_rand(stack.matter().rand()),
+        Dataver::new_rand(&mut rand),
         LIGHT_ENDPOINT_ID,
         TestOnOffDeviceLogic::new(true),
     );
@@ -87,12 +95,12 @@ fn main() -> Result<(), Error> {
         // Just use the one that `rs-matter` provides out of the box
         .chain(
             EpClMatcher::new(Some(LIGHT_ENDPOINT_ID), Some(DescHandler::CLUSTER.id)),
-            Async(DescHandler::new(Dataver::new_rand(stack.matter().rand())).adapt()),
+            Async(DescHandler::new(Dataver::new_rand(&mut rand)).adapt()),
         );
 
     // Create the persister & load any previously saved state
     let persist = futures_lite::future::block_on(
-        stack.create_persist_with_comm_window(DirKvBlobStore::new_default()),
+        stack.create_persist_with_comm_window(&crypto, DirKvBlobStore::new_default()),
     )?;
 
     // Run the Matter stack with our handler
@@ -107,10 +115,13 @@ fn main() -> Result<(), Error> {
             NoopWirelessNetCtl::new(NetworkType::Wifi),
             // Will use the mDNS implementation based on the `zeroconf` crate
             ZeroconfMdns,
+            // The Bluetooth transport implementation based on the `bluer` crate.
             BluerGattPeripheral::new(None),
         ),
         // Will persist in `<tmp-dir>/rs-matter`
         &persist,
+        // The crypto provider, used for all the cryptographic operations of the stack
+        &crypto,
         // Our `AsyncHandler` + `AsyncMetadata` impl
         (NODE, handler),
         // No user task to run
