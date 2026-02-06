@@ -59,3 +59,5 @@ where
         Ok(())
     }
 }
+
+impl<T> CryptoRng for RngAdaptor<T> where T: rand_core09::RngCore + rand_core09::CryptoRng {}
