@@ -70,6 +70,7 @@ pub mod mdns;
 pub mod nal;
 pub mod network;
 pub mod persist;
+pub mod rand;
 pub mod udp;
 pub mod utils;
 pub mod wireless;
