@@ -160,6 +160,8 @@ zbus = ["rs-matter/zbus"]
 zeroconf = ["os", "rs-matter/zeroconf"]
 astro-dnssd = ["os", "rs-matter/astro-dnssd"]
 rustcrypto = ["rs-matter/rustcrypto"]
+mbedtls = ["rs-matter/mbedtls"]
+openssl = ["rs-matter/openssl"]
 os = ["backtrace", "rs-matter/os", "rustcrypto", "embassy-time/std"]
 backtrace = ["std", "rs-matter/backtrace"]
 async-io-mini = ["std", "edge-nal-std/async-io-mini"]
@@ -185,6 +187,7 @@ edge-nal-std = { version = "0.5", optional = true }
 edge-mdns = { version = "0.6", optional = true }
 rand_core06 = { package = "rand_core", version = "0.6" }
 rand_core09 = { package = "rand_core", version = "0.9" }
+rand_chacha = { version = "0.9", default-features = false }
 
 [target.'cfg(all(unix, not(target_os = "espidf")))'.dependencies]
 bitflags = "2"

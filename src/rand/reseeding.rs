@@ -219,7 +219,7 @@ where
         let num_bytes = size_of_val(results.as_ref());
 
         if let Err(e) = self.reseed() {
-            warn!("Reseeding RNG failed: {}", e);
+            warn!("Reseeding RNG failed: {}", display2format!(e));
             let _ = e;
         }
 
