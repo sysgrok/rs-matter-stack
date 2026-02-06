@@ -3,6 +3,7 @@ use core::pin::pin;
 use embassy_futures::select::{select, select3};
 use embassy_sync::blocking_mutex::raw::RawMutex;
 
+use rs_matter::crypto::Crypto;
 use rs_matter::dm::clusters::gen_diag::NetifDiag;
 use rs_matter::dm::clusters::net_comm::NetCtl;
 use rs_matter::dm::clusters::wifi_diag::WirelessDiag;
@@ -10,6 +11,7 @@ use rs_matter::dm::networks::wireless::{
     NetCtlState, WirelessMgr, WirelessNetwork, WirelessNetworks, MAX_CREDS_SIZE,
 };
 use rs_matter::dm::networks::NetChangeNotif;
+use rs_matter::dm::ChangeNotify;
 use rs_matter::error::Error;
 use rs_matter::pairing::DiscoveryCapabilities;
 use rs_matter::transport::network::btp::{Btp, BtpContext, GattPeripheral};
@@ -157,18 +159,22 @@ where
     T: WirelessNetwork,
     E: Embedding + 'static,
 {
-    async fn run_net_coex<S, N, D, C, G>(
+    #[allow(clippy::too_many_arguments)]
+    async fn run_net_coex<C, S, N, D, Q, G>(
         &'static self,
+        crypto: C,
+        notify: &dyn ChangeNotify,
         net_stack: S,
         netif: N,
-        net_ctl: C,
+        net_ctl: Q,
         mut mdns: D,
         mut gatt: G,
     ) -> Result<(), Error>
     where
+        C: Crypto,
         S: NetStack,
         N: NetifDiag + NetChangeNotif,
-        C: NetCtl + WirelessDiag + NetChangeNotif,
+        Q: NetCtl + WirelessDiag + NetChangeNotif,
         D: Mdns,
         G: GattPeripheral,
     {
@@ -178,21 +184,24 @@ where
 
         let mut net_task = pin_alloc!(
             self.bump,
-            self.run_btp_coex(&net_stack, &netif, &mut mdns, &mut gatt)
+            self.run_btp_coex(&crypto, notify, &net_stack, &netif, &mut mdns, &mut gatt)
         );
         let mut mgr_task = pin_alloc!(self.bump, mgr.run());
 
         select(&mut net_task, &mut mgr_task).coalesce().await
     }
 
-    async fn run_btp_coex<S, N, D, P>(
+    async fn run_btp_coex<C, S, N, D, P>(
         &'static self,
+        crypto: C,
+        notify: &dyn ChangeNotify,
         net_stack: S,
         netif: N,
         mut mdns: D,
         peripheral: P,
     ) -> Result<(), Error>
     where
+        C: Crypto,
         S: NetStack,
         N: NetifDiag + NetChangeNotif,
         D: Mdns,
@@ -213,12 +222,17 @@ where
 
         let mut net_task = pin_alloc!(
             self.bump,
-            self.run_oper_net(&net_stack, core::future::pending(), Some((&btp, &btp)))
+            self.run_oper_net(
+                &crypto,
+                &net_stack,
+                core::future::pending(),
+                Some((&btp, &btp))
+            )
         );
 
         let mut mdns_task = pin_alloc!(
             self.bump,
-            self.run_oper_netif_mdns(&net_stack, &netif, &mut mdns)
+            self.run_oper_netif_mdns(&crypto, notify, &net_stack, &netif, &mut mdns)
         );
 
         select3(&mut btp_task, &mut net_task, &mut mdns_task)
@@ -226,8 +240,9 @@ where
             .await
     }
 
-    async fn run_btp<P>(&'static self, peripheral: P) -> Result<(), Error>
+    async fn run_btp<C, P>(&'static self, crypto: C, peripheral: P) -> Result<(), Error>
     where
+        C: Crypto,
         P: GattPeripheral,
     {
         let btp = Btp::new(peripheral, &self.network.btp_context);
@@ -242,7 +257,7 @@ where
             self.matter().dev_comm().discriminator,
         ));
 
-        let mut net_task = pin!(self.run_transport_net(&btp, &btp));
+        let mut net_task = pin!(self.run_transport_net(&crypto, &btp, &btp));
         let mut oper_net_act_task = pin!(async {
             NetCtlState::wait_prov_ready(&self.network.net_state, &btp).await;
 
@@ -288,12 +303,14 @@ impl<S, N, C, M, G> PreexistingWireless<S, N, C, M, G> {
     }
 }
 
-pub(crate) struct MatterStackWirelessTask<'a, const B: usize, M, T, E, H, U>(
-    &'a MatterStack<'a, B, WirelessBle<M, T, E>>,
-    H,
-    U,
-)
+pub(crate) struct MatterStackWirelessTask<'a, const B: usize, M, T, E, C, H, U>
 where
     M: RawMutex + Send + Sync + 'static,
     T: WirelessNetwork,
-    E: Embedding + 'static;
+    E: Embedding + 'static,
+{
+    stack: &'a MatterStack<'a, B, WirelessBle<M, T, E>>,
+    crypto: C,
+    handler: H,
+    user_task: U,
+}

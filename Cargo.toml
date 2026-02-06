@@ -183,8 +183,6 @@ rs-matter = { version = "0.1", default-features = false }
 edge-nal = "0.5"
 edge-nal-std = { version = "0.5", optional = true }
 edge-mdns = { version = "0.6", optional = true }
-rand_core = "0.9"
-rand_core06 = { package = "rand_core", version = "0.6" } # For now, until `openthread` gets upgraded to 0.9 as well
 
 [target.'cfg(all(unix, not(target_os = "espidf")))'.dependencies]
 bitflags = "2"
@@ -196,6 +194,7 @@ futures-lite = "1"
 async-compat = "0.2"
 env_logger = "0.11"
 embassy-time-queue-utils = { version = "0.3", features = ["generic-queue-64"] }
+rand = { version = "0.8", features = ["std", "std_rng"] }
 
 [[example]]
 name = "light_eth"

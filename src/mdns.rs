@@ -4,6 +4,8 @@ use core::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
 
 use edge_nal::{UdpBind, UdpSplit};
 
+use rs_matter::crypto::Crypto;
+use rs_matter::dm::ChangeNotify;
 use rs_matter::error::{Error, ErrorCode};
 use rs_matter::transport::network::mdns::builtin::BuiltinMdnsResponder;
 use rs_matter::Matter;
@@ -15,9 +17,12 @@ pub trait Mdns {
     /// Run the mDNS responder with the given UDP binding, MAC address, IPv4 and IPv6 addresses, and interface index.
     ///
     /// NOTE: This trait might change once `rs-matter` starts supporting mDNS resolvers
-    async fn run<U>(
+    #[allow(clippy::too_many_arguments)]
+    async fn run<C, U>(
         &mut self,
         matter: &Matter<'_>,
+        crypto: C,
+        notify: &dyn ChangeNotify,
         udp: U,
         mac: &[u8],
         ipv4: Ipv4Addr,
@@ -25,6 +30,7 @@ pub trait Mdns {
         interface: u32,
     ) -> Result<(), Error>
     where
+        C: Crypto,
         U: UdpBind;
 }
 
@@ -32,9 +38,11 @@ impl<T> Mdns for &mut T
 where
     T: Mdns,
 {
-    fn run<U>(
+    fn run<C, U>(
         &mut self,
         matter: &Matter<'_>,
+        crypto: C,
+        notify: &dyn ChangeNotify,
         udp: U,
         mac: &[u8],
         ipv4: Ipv4Addr,
@@ -42,9 +50,10 @@ where
         interface: u32,
     ) -> impl Future<Output = Result<(), Error>>
     where
+        C: Crypto,
         U: UdpBind,
     {
-        (*self).run(matter, udp, mac, ipv4, ipv6, interface)
+        (*self).run(matter, crypto, notify, udp, mac, ipv4, ipv6, interface)
     }
 }
 
@@ -54,16 +63,21 @@ pub struct BuiltinMdns;
 impl BuiltinMdns {
     /// A utility to prep and run the built-in `rs-matter` mDNS responder for Matter via the `edge-nal` UDP traits.
     ///
-    /// Arguments:
+    /// # Arguments
     /// - `matter`: A reference to the `Matter` instance.
+    /// - `crypto`: An object implementing the `Crypto` trait for cryptographic operations.
+    /// - `notify`: A reference to an object implementing the `ChangeNotify` trait for notifying about changes in the device state.
     /// - `udp`: An object implementing the `UdpBind` trait for binding UDP sockets.
     /// - `mac`: The MAC address of the host, used to generate the hostname.
     /// - `ipv4`: The IPv4 address of the host.
     /// - `ipv6`: The IPv6 address of the host.
     /// - `interface`: The interface index for the host, used for IPv6 multicast.
-    pub async fn run<U>(
+    #[allow(clippy::too_many_arguments)]
+    pub async fn run<C, U>(
         &mut self,
         matter: &Matter<'_>,
+        crypto: C,
+        notify: &dyn ChangeNotify,
         udp: U,
         mac: &[u8],
         ipv4: Ipv4Addr,
@@ -71,6 +85,7 @@ impl BuiltinMdns {
         interface: u32,
     ) -> Result<(), Error>
     where
+        C: Crypto,
         U: UdpBind,
     {
         use core::fmt::Write as _;
@@ -133,7 +148,7 @@ impl BuiltinMdns {
             panic!("Invalid MAC address length: should be 6 or 8 bytes");
         }
 
-        BuiltinMdnsResponder::new(matter)
+        BuiltinMdnsResponder::new(matter, crypto, notify)
             .run(
                 udp::Udp(send),
                 udp::Udp(recv),
@@ -153,9 +168,11 @@ impl BuiltinMdns {
 }
 
 impl Mdns for BuiltinMdns {
-    fn run<U>(
+    fn run<C, U>(
         &mut self,
         matter: &Matter<'_>,
+        crypto: C,
+        notify: &dyn ChangeNotify,
         udp: U,
         mac: &[u8],
         ipv4: Ipv4Addr,
@@ -163,9 +180,12 @@ impl Mdns for BuiltinMdns {
         interface: u32,
     ) -> impl Future<Output = Result<(), Error>>
     where
+        C: Crypto,
         U: UdpBind,
     {
-        Self::run(self, matter, udp, mac, ipv4, ipv6, interface)
+        Self::run(
+            self, matter, crypto, notify, udp, mac, ipv4, ipv6, interface,
+        )
     }
 }
 
@@ -256,18 +276,25 @@ pub struct ZeroconfMdns;
 
 #[cfg(feature = "zeroconf")]
 impl ZeroconfMdns {
-    pub async fn run(&mut self, matter: &Matter<'_>) -> Result<(), Error> {
+    pub async fn run<C: Crypto>(
+        &mut self,
+        matter: &Matter<'_>,
+        crypto: C,
+        notify: &dyn ChangeNotify,
+    ) -> Result<(), Error> {
         rs_matter::transport::network::mdns::zeroconf::ZeroconfMdnsResponder::new(matter)
-            .run()
+            .run(crypto, notify)
             .await
     }
 }
 
 #[cfg(feature = "zeroconf")]
 impl Mdns for ZeroconfMdns {
-    fn run<U>(
+    fn run<C, U>(
         &mut self,
         matter: &Matter<'_>,
+        crypto: C,
+        notify: &dyn ChangeNotify,
         _udp: U,
         _mac: &[u8],
         _ipv4: Ipv4Addr,
@@ -275,9 +302,10 @@ impl Mdns for ZeroconfMdns {
         _interface: u32,
     ) -> impl Future<Output = Result<(), Error>>
     where
+        C: Crypto,
         U: UdpBind,
     {
-        Self::run(self, matter)
+        Self::run(self, matter, crypto, notify)
     }
 }
 

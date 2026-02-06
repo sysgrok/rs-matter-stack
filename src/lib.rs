@@ -24,20 +24,22 @@ use embassy_time::Duration;
 
 use persist::{KvBlobBuffer, KvBlobStore, MatterPersist, NetworkPersist};
 
+use rs_matter::crypto::Crypto;
 use rs_matter::dm::clusters::basic_info::BasicInfoConfig;
-use rs_matter::dm::clusters::dev_att::DevAttDataFetcher;
+use rs_matter::dm::clusters::dev_att::DeviceAttestation;
 use rs_matter::dm::clusters::gen_diag::NetifDiag;
 use rs_matter::dm::networks::NetChangeNotif;
 use rs_matter::dm::subscriptions::Subscriptions;
-use rs_matter::dm::{AsyncHandler, AsyncMetadata, AttrId, ClusterId, DataModel, EndptId, IMBuffer};
+use rs_matter::dm::{
+    AsyncHandler, AsyncMetadata, AttrId, ChangeNotify, ClusterId, DataModel, EndptId, IMBuffer,
+};
 use rs_matter::error::{Error, ErrorCode};
 use rs_matter::pairing::qr::QrTextType;
 use rs_matter::respond::{DefaultResponder, ExchangeHandler, Responder};
-use rs_matter::sc::pake::MAX_COMM_WINDOW_TIMEOUT_SECS;
+use rs_matter::sc::pase::MAX_COMM_WINDOW_TIMEOUT_SECS;
 use rs_matter::transport::network::{Address, ChainedNetwork, NetworkReceive, NetworkSend};
 use rs_matter::utils::epoch::Epoch;
 use rs_matter::utils::init::{init, Init};
-use rs_matter::utils::rand::Rand;
 use rs_matter::utils::select::Coalesce;
 use rs_matter::utils::storage::pooled::PooledBuffers;
 use rs_matter::utils::sync::IfMutex;
@@ -68,7 +70,6 @@ pub mod mdns;
 pub mod nal;
 pub mod network;
 pub mod persist;
-pub mod rand;
 pub mod udp;
 pub mod utils;
 pub mod wireless;
@@ -193,6 +194,9 @@ cfg_if! {
 
 const MAX_BUSY_RESPONDERS: usize = 2;
 
+pub(crate) type MatterStackDataModel<'a, C, H> =
+    DataModel<'a, MAX_SUBSCRIPTIONS, C, PooledBuffers<MAX_IM_BUFFERS, NoopRawMutex, IMBuffer>, H>;
+
 /// The `MatterStack` struct is the main entry point for the Matter stack.
 ///
 /// It wraps the actual `rs-matter` Matter instance and provides a simplified API for running the stack.
@@ -222,14 +226,13 @@ where
     pub const fn new_default(
         dev_det: &'a BasicInfoConfig,
         dev_comm: BasicCommData,
-        dev_att: &'a dyn DevAttDataFetcher,
+        dev_att: &'a dyn DeviceAttestation,
     ) -> Self {
         Self::new(
             dev_det,
             dev_comm,
             dev_att,
             rs_matter::utils::epoch::sys_epoch,
-            rs_matter::utils::rand::sys_rand,
         )
     }
 
@@ -239,12 +242,11 @@ where
     pub const fn new(
         dev_det: &'a BasicInfoConfig,
         dev_comm: BasicCommData,
-        dev_att: &'a dyn DevAttDataFetcher,
+        dev_att: &'a dyn DeviceAttestation,
         epoch: Epoch,
-        rand: Rand,
     ) -> Self {
         Self {
-            matter: Matter::new(dev_det, dev_comm, dev_att, epoch, rand, MATTER_PORT),
+            matter: Matter::new(dev_det, dev_comm, dev_att, epoch, MATTER_PORT),
             buffers: PooledBuffers::new(0),
             subscriptions: Subscriptions::new(),
             store_buf: PooledBuffers::new(0),
@@ -261,14 +263,13 @@ where
     pub fn init_default(
         dev_det: &'a BasicInfoConfig,
         dev_comm: BasicCommData,
-        dev_att: &'a dyn DevAttDataFetcher,
+        dev_att: &'a dyn DeviceAttestation,
     ) -> impl Init<Self> {
         Self::init(
             dev_det,
             dev_comm,
             dev_att,
             rs_matter::utils::epoch::sys_epoch,
-            rs_matter::utils::rand::sys_rand,
         )
     }
 
@@ -276,9 +277,8 @@ where
     pub fn init(
         dev_det: &'a BasicInfoConfig,
         dev_comm: BasicCommData,
-        dev_att: &'a dyn DevAttDataFetcher,
+        dev_att: &'a dyn DeviceAttestation,
         epoch: Epoch,
-        rand: Rand,
     ) -> impl Init<Self> {
         init!(Self {
             matter <- Matter::init(
@@ -286,7 +286,6 @@ where
                 dev_comm,
                 dev_att,
                 epoch,
-                rand,
                 MATTER_PORT,
             ),
             buffers <- PooledBuffers::init(0),
@@ -302,7 +301,7 @@ where
     /// A utility method to replace the initial Device Attestation Data Fetcher with another one.
     ///
     /// Reasoning and use-cases explained in the documentation of `replace_mdns`.
-    pub fn replace_dev_att(&mut self, dev_att: &'a dyn DevAttDataFetcher) {
+    pub fn replace_dev_att(&mut self, dev_att: &'a dyn DeviceAttestation) {
         self.matter.replace_dev_att(dev_att);
     }
 
@@ -324,6 +323,7 @@ where
     /// An "all in one" persistence initializer method.
     ///
     /// # Arguments
+    /// - `crypto` - a user-provided crypto implementation
     /// - `store` - a reference to a `KvBlobStore` instance
     ///
     /// This method does the following:
@@ -337,13 +337,22 @@ where
     /// This method is useful primarily for development/demo purposes. In production scenarios,
     /// it is likely that the user would require more fine-graned control over when to open
     /// the commissioning window, with what timeout, whether to print the QR code, etc.
-    pub async fn create_persist_with_comm_window<'t, S>(
+    pub async fn create_persist_with_comm_window<'t, C, S>(
         &'t self,
+        crypto: C,
         store: S,
     ) -> Result<MatterPersist<'t, S, N::PersistContext<'t>>, Error>
     where
+        C: Crypto,
         S: KvBlobStore + 't,
     {
+        // The data model is not created yet, so we don't have to notify anything
+        struct DummyNotify;
+
+        impl ChangeNotify for DummyNotify {
+            fn notify(&self, _endpoint_id: EndptId, _cluster_id: ClusterId, _attr_id: AttrId) {}
+        }
+
         let persist = self.create_persist(store);
 
         persist.load().await?;
@@ -351,8 +360,11 @@ where
         if !self.matter().is_commissioned() {
             info!("Device is not commissioned yet, opening commissioning window...");
 
-            self.matter()
-                .open_basic_comm_window(MAX_COMM_WINDOW_TIMEOUT_SECS)?;
+            self.matter().open_basic_comm_window(
+                MAX_COMM_WINDOW_TIMEOUT_SECS,
+                crypto,
+                &DummyNotify,
+            )?;
             self.matter()
                 .print_standard_qr_text(self.network.discovery_capabilities())?;
             self.matter().print_standard_qr_code(
@@ -448,20 +460,23 @@ where
     /// This method is a specialization of `run_transport_net` over the UDP transport (both IPv4 and IPv6).
     /// It calls `run_transport_net`.
     ///
-    /// Parameters:
+    /// #Arguments
+    /// - `crypto` - a user-provided crypto implementation, necessary for the secure sessions establishment that happens in the operational network
     /// - `net_stack` - a user-provided network stack that implements `UdpBind`, `UdpConnect`, `TcpBind`, `TcpConnect`, and `Dns`
     /// - `netif` - a user-provided `Netif` implementation
     /// - `until` - the method will return once this future becomes ready
     /// - `comm` - a tuple of additional and optional `NetworkReceive` and `NetworkSend` transport implementations
     ///   (useful when a second transport needs to run in parallel with the operational Matter transport,
     ///   i.e. when using concurrent commissisoning)
-    async fn run_oper_net<U, X, R, S>(
+    async fn run_oper_net<C, U, X, R, S>(
         &self,
+        crypto: C,
         net_stack: U,
         until: X,
         mut comm: Option<(R, S)>,
     ) -> Result<(), Error>
     where
+        C: Crypto,
         U: NetStack,
         X: Future<Output = Result<(), Error>>,
         R: NetworkReceive,
@@ -492,6 +507,7 @@ where
             info!("Running operational and commissioning networks");
 
             let mut netw_task = pin!(self.run_transport_net(
+                &crypto,
                 ChainedNetwork::new(Address::is_udp, udp::Udp(send), comm_send),
                 ChainedNetwork::new(Address::is_udp, udp::Udp(recv), comm_recv),
             ));
@@ -500,7 +516,8 @@ where
         } else {
             info!("Running operational network");
 
-            let mut netw_task = pin!(self.run_transport_net(udp::Udp(send), udp::Udp(recv)));
+            let mut netw_task =
+                pin!(self.run_transport_net(&crypto, udp::Udp(send), udp::Udp(recv)));
 
             select(&mut netw_task, &mut until_task).coalesce().await
         }
@@ -514,17 +531,22 @@ where
     /// This is necessary because mDNS needs to know the current IP addresses and
     /// also needs to stop when the netif goes down.
     ///
-    /// Parameters:
+    /// # Arguments
+    /// - `crypto` - a user-provided crypto implementation
+    /// - `notify` - a user-provided `ChangeNotify`; typically, the Data Model
     /// - `net_stack` - a user-provided network stack that implements `UdpBind`, `UdpConnect`, `TcpBind`, `TcpConnect`, and `Dns`
     /// - `netif` - a user-provided `Netif` implementation
     /// - `mdns` - a user-provided mDNS implementation
-    async fn run_oper_netif_mdns<U, I, M>(
+    async fn run_oper_netif_mdns<C, U, I, M>(
         &self,
+        crypto: C,
+        notify: &dyn ChangeNotify,
         net_stack: U,
         netif: I,
         mut mdns: M,
     ) -> Result<(), Error>
     where
+        C: Crypto,
         U: NetStack,
         I: NetifDiag + NetChangeNotif,
         M: Mdns,
@@ -625,6 +647,8 @@ where
                         let _result = mdns
                             .run(
                                 self.matter(),
+                                &crypto,
+                                notify,
                                 &udp_bind,
                                 &cur_state.mac,
                                 cur_state.ipv4,
@@ -650,33 +674,46 @@ where
         }
     }
 
-    async fn run_handler<H>(&self, handler: H) -> Result<(), Error>
+    #[inline(always)]
+    fn dm<C, H>(&self, crypto: C, handler: H) -> MatterStackDataModel<'_, C, H>
     where
+        C: Crypto,
+        H: AsyncHandler + AsyncMetadata,
+    {
+        MatterStackDataModel::new(
+            self.matter(),
+            crypto,
+            &self.buffers,
+            &self.subscriptions,
+            handler,
+        )
+    }
+
+    async fn run_dm<C, H>(&self, dm: &MatterStackDataModel<'_, C, H>) -> Result<(), Error>
+    where
+        C: Crypto,
         H: AsyncHandler + AsyncMetadata,
     {
         // TODO
         // Reset the Matter transport buffers and all sessions first
         // self.matter().reset_transport()?;
 
-        let dm = DataModel::new(self.matter(), &self.buffers, &self.subscriptions, handler);
-
-        let mut responder = pin!(self.run_responder(&dm));
+        let mut responder = pin!(self.run_responder(dm));
         let mut dm_job = pin!(dm.run());
 
         select(&mut responder, &mut dm_job).coalesce().await
     }
 
-    async fn run_handler_with_bump<H>(&self, handler: H) -> Result<(), Error>
+    async fn run_dm_with_bump<C, H>(&self, dm: &MatterStackDataModel<'_, C, H>) -> Result<(), Error>
     where
+        C: Crypto,
         H: AsyncHandler + AsyncMetadata,
     {
         // TODO
         // Reset the Matter transport buffers and all sessions first
         // self.matter().reset_transport()?;
 
-        let dm = DataModel::new(self.matter(), &self.buffers, &self.subscriptions, handler);
-
-        let mut responder = pin_alloc!(self.bump, self.run_responder_with_bump(&dm));
+        let mut responder = pin_alloc!(self.bump, self.run_responder_with_bump(dm));
         let mut dm_job = pin!(dm.run());
 
         select(&mut responder, &mut dm_job).coalesce().await
@@ -693,11 +730,9 @@ where
         persist.run()
     }
 
-    async fn run_responder<const SN: usize, H>(
-        &self,
-        dm: &DataModel<'_, SN, PooledBuffers<MAX_IM_BUFFERS, NoopRawMutex, IMBuffer>, H>,
-    ) -> Result<(), Error>
+    async fn run_responder<C, H>(&self, dm: &MatterStackDataModel<'_, C, H>) -> Result<(), Error>
     where
+        C: Crypto,
         H: AsyncHandler + AsyncMetadata,
     {
         let responder = DefaultResponder::new(dm);
@@ -709,11 +744,12 @@ where
         Ok(())
     }
 
-    async fn run_responder_with_bump<const SN: usize, H>(
+    async fn run_responder_with_bump<C, H>(
         &self,
-        dm: &DataModel<'_, SN, PooledBuffers<MAX_IM_BUFFERS, NoopRawMutex, IMBuffer>, H>,
+        dm: &MatterStackDataModel<'_, C, H>,
     ) -> Result<(), Error>
     where
+        C: Crypto,
         H: AsyncHandler + AsyncMetadata,
     {
         let responder = DefaultResponder::new(dm);
@@ -760,16 +796,18 @@ where
         select_slice(handlers).await.0
     }
 
-    fn run_transport_net<'t, S, R>(
+    fn run_transport_net<'t, C, S, R>(
         &'t self,
+        crypto: C,
         send: S,
         recv: R,
     ) -> impl Future<Output = Result<(), Error>> + 't
     where
+        C: Crypto + 't,
         S: NetworkSend + 't,
         R: NetworkReceive + 't,
     {
-        self.matter().run_transport(send, recv)
+        self.matter().run_transport(crypto, send, recv)
     }
 }
 
