@@ -7,7 +7,7 @@
 //! `rustc` not being very intelligent w.r.t. stack usage in async functions.
 
 use core::marker::PhantomData;
-use core::mem::MaybeUninit;
+use core::mem::{self, MaybeUninit};
 use core::pin::Pin;
 use core::ptr::NonNull;
 
@@ -102,38 +102,37 @@ impl<const N: usize, M: RawMutex> Bump<N, M> {
         T: Sized,
     {
         self.inner.lock(|inner| {
+            // SAFETY:
+            // The idea is to have a large chunk of memory allocated on the stack,
+            // with this function one can reserve a chunk of that memory for an object
+            // of type T.
+            //
+            // To reserve the memory, it will move the offset forward by the size required
+            // for T, and return a **mutable** reference to it.
+            //
+            // Given that it returns a mutable reference to it, there cannot be any other
+            // references to that memory location. This is ensured by the offset.
+
+            let size = mem::size_of_val(&object);
+
             let mut inner = inner.borrow_mut();
-
-            let size = core::mem::size_of_val(&object);
-
             let offset = inner.offset;
-            let memory = unsafe { inner.memory.assume_init_mut() };
 
             info!(
                 "BUMP[{}]: {}b (U:{}b/F:{}b)",
                 location,
                 size,
                 offset,
-                memory.len() - offset
+                inner.len() - offset
             );
 
-            let remaining = &mut memory[offset..];
-            let remaining_len = remaining.len();
+            let value = inner.allocate::<T>();
 
-            let (t_buf, r_buf) = align_min::<T>(remaining, 1);
-
-            // Safety: We just allocated the memory and it's properly aligned
-            let ptr = unsafe {
-                let ptr = t_buf.as_ptr() as *mut T;
-                ptr.write(object);
-
-                NonNull::new_unchecked(ptr)
-            };
-
-            inner.offset += remaining_len - r_buf.len();
+            value.write(object);
 
             BumpBox {
-                ptr,
+                // SAFETY: The code above wrote to the memory location -> it can not be null
+                ptr: unsafe { NonNull::new_unchecked(value.as_mut_ptr()) },
                 _allocator: PhantomData,
             }
         })
@@ -143,7 +142,7 @@ impl<const N: usize, M: RawMutex> Bump<N, M> {
 /// A box-like container that uses bump allocation
 pub struct BumpBox<'a, T> {
     ptr: NonNull<T>,
-    _allocator: core::marker::PhantomData<&'a ()>,
+    _allocator: PhantomData<&'a ()>,
 }
 
 impl<T> BumpBox<'_, T> {
@@ -182,7 +181,22 @@ impl<T> Drop for BumpBox<'_, T> {
 }
 
 struct Inner<const N: usize> {
-    memory: MaybeUninit<[u8; N]>,
+    // It is uncertain whether a [MaybeUninit<u8>; N] initialized with [const { MaybeUninit::uninit() }; N]
+    // would never be temporarily allocated on the stack and then moved to the final destination.
+    //
+    // In addition to that, the const { MaybeUninit::uninit() } sometimes results in bad optimizations like
+    // https://stackoverflow.com/questions/79513440.
+    // With the 1.77 compiler target, this issue would still be present, and const expressions only got
+    // stabilized in 1.79 -> not available.
+    //
+    // To avoid this, the entire array is wrapped in a MaybeUninit, which should prevent the compiler from
+    // trying to eagerly initialize the array on the stack.
+    //
+    // Technically it is enough to have MaybeUninit<[u8; N]> and then transmute it to [MaybeUninit<u8>; N]
+    // (which is safe to do), but this would require a transmute that is easy to get wrong.
+    // Using MaybeUninit<[MaybeUninit<u8>; N]> does not have any downsides and one can just use assume_init
+    // or assume_init_mut to get the [MaybeUninit<u8>; N] directly.
+    memory: MaybeUninit<[MaybeUninit<u8>; N]>,
     offset: usize,
 }
 
@@ -200,10 +214,40 @@ impl<const N: usize> Inner<N> {
             offset: 0,
         })
     }
+
+    fn len(&self) -> usize {
+        N
+    }
+
+    /// Allocate space for an object of type `T`
+    ///
+    /// # Panics
+    ///
+    /// If there is not enough memory left in the bump allocator to
+    /// allocate the requested objects.
+    fn allocate<T>(&mut self) -> &mut MaybeUninit<T> {
+        // SAFETY: This is safe because the type we are claiming to have initialized,
+        //         is a bunch of `MaybeUninit`s, which do not require initialization.
+        let data: &mut [MaybeUninit<u8>; N] = unsafe { self.memory.assume_init_mut() };
+
+        // We can only use the memory from the current offset onwards, because
+        // the previous memory might be in use by previously allocated objects.
+        let remaining = &mut data[self.offset..];
+        let remaining_len = remaining.len();
+        // The t_buf will be where the caller can place their objects,
+        // and r_buf should be the remaining unused memory.
+        let (t_buf, r_buf) = align_min::<T>(remaining, 1);
+        self.offset += remaining_len - r_buf.len();
+
+        &mut t_buf[0]
+    }
 }
 
-fn align_min<T>(buf: &mut [u8], count: usize) -> (&mut [MaybeUninit<T>], &mut [u8]) {
-    if count == 0 || core::mem::size_of::<T>() == 0 {
+fn align_min<T>(
+    buf: &mut [MaybeUninit<u8>],
+    count: usize,
+) -> (&mut [MaybeUninit<T>], &mut [MaybeUninit<u8>]) {
+    if count == 0 || mem::size_of::<T>() == 0 {
         return (&mut [], buf);
     }
 
@@ -215,7 +259,7 @@ fn align_min<T>(buf: &mut [u8], count: usize) -> (&mut [MaybeUninit<T>], &mut [u
     // Shrink `t_buf` to the number of requested items (count)
     let t_buf = &mut t_buf[..count];
     let t_leading_buf0_len = t_leading_buf0.len();
-    let t_buf_size = core::mem::size_of_val(t_buf);
+    let t_buf_size = mem::size_of_val(t_buf);
 
     let (buf0, remaining_buf) = buf.split_at_mut(t_leading_buf0_len + t_buf_size);
 
@@ -225,4 +269,40 @@ fn align_min<T>(buf: &mut [u8], count: usize) -> (&mut [MaybeUninit<T>], &mut [u
     assert!(t_remaining_buf.is_empty());
 
     (t_buf, remaining_buf)
+}
+
+#[cfg(all(test, feature = "std"))]
+mod tests {
+    use super::*;
+
+    use alloc::vec::Vec;
+    use rs_matter::utils::sync::blocking::raw::StdRawMutex;
+
+    const BUMP_SIZE: usize = 1024;
+    const DEFAULT_VALUE: u32 = 0xDEADBEEF;
+
+    #[test]
+    fn test_one_concurrent_borrow() {
+        static BUMP: Bump<BUMP_SIZE, StdRawMutex> = Bump::new();
+
+        for _ in 0..(BUMP_SIZE / mem::size_of_val(&DEFAULT_VALUE)) {
+            let b1 = BUMP.alloc(DEFAULT_VALUE, "test1");
+
+            assert_eq!(*b1, DEFAULT_VALUE);
+        }
+    }
+
+    #[test]
+    fn test_multiple_concurrent_borrow() {
+        static BUMP: Bump<BUMP_SIZE, StdRawMutex> = Bump::new();
+
+        let mut all_boxes = Vec::new();
+        for i in 0..(BUMP_SIZE / mem::size_of::<usize>()) {
+            all_boxes.push(alloc!(BUMP, i));
+        }
+
+        for (i, b) in all_boxes.into_iter().enumerate() {
+            assert_eq!(*b, i);
+        }
+    }
 }
