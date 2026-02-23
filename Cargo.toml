@@ -13,8 +13,8 @@ readme = "README.md"
 rust-version = "1.77"
 
 [patch.crates-io]
-rs-matter = { git = "https://github.com/project-chip/rs-matter" }
-#rs-matter = { git = "https://github.com/sysgrok/rs-matter", branch = "next" }
+#rs-matter = { git = "https://github.com/project-chip/rs-matter" }
+rs-matter = { git = "https://github.com/sysgrok/rs-matter", branch = "next" }
 #rs-matter = { path = "../rs-matter/rs-matter" }
 #edge-nal = { git = "https://github.com/sysgrok/edge-net" }
 #edge-nal-std = { git = "https://github.com/sysgrok/edge-net" }

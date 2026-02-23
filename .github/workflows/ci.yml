@@ -44,6 +44,7 @@ jobs:
         run: cargo clippy --no-deps --no-default-features --features ${{matrix.features}} -- -Dwarnings
 
       - name: Clippy - defmt
+        if: ${{ matrix.features == 'std' }}
         run: export DEFMT_LOG=trace; cargo clippy --no-deps --no-default-features --features ${{matrix.features}},defmt -- -Dwarnings
 
       - name: Build | no_std
