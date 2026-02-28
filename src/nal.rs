@@ -238,6 +238,10 @@ pub mod noop {
         async fn write(&mut self, _buf: &[u8]) -> Result<usize, Self::Error> {
             panic!("Write not supported")
         }
+
+        async fn flush(&mut self) -> Result<(), Self::Error> {
+            panic!("Flush not supported")
+        }
     }
 
     impl TcpSplit for NoopNet {
