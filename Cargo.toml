@@ -154,8 +154,8 @@ max-exchanges-per-session-4 = ["rs-matter/max-exchanges-per-session-4"]
 max-exchanges-per-session-3 = ["rs-matter/max-exchanges-per-session-3"]
 
 # General
-log = ["dep:log", "rs-matter/log", "embedded-svc/log", "edge-mdns?/log"]
-defmt = ["dep:defmt", "rs-matter/defmt", "embedded-svc/defmt", "heapless/defmt-03", "edge-mdns?/defmt"]
+log = ["dep:log", "rs-matter/log", "edge-mdns?/log"]
+defmt = ["dep:defmt", "rs-matter/defmt", "heapless/defmt-03", "edge-mdns?/defmt"]
 zbus = ["rs-matter/zbus"]
 zeroconf = ["os", "rs-matter/zeroconf"]
 astro-dnssd = ["os", "rs-matter/astro-dnssd"]
@@ -166,7 +166,7 @@ os = ["backtrace", "rs-matter/os", "rustcrypto", "embassy-time/std"]
 backtrace = ["std", "rs-matter/backtrace"]
 async-io-mini = ["std", "edge-nal-std/async-io-mini"]
 std = ["alloc", "rs-matter/std", "edge-nal-std"]
-alloc = ["embedded-svc/alloc"]
+alloc = ["rs-matter/alloc"]
 examples = ["log", "os", "nix", "embassy-time-queue-utils/generic-queue-64", "zeroconf"]
 
 [dependencies]
@@ -180,7 +180,6 @@ scopeguard = { version = "1", default-features = false }
 embassy-futures = "0.1"
 embassy-sync = "0.7"
 embassy-time = "0.5"
-embedded-svc = { version = "0.28", default-features = false }
 rs-matter = { version = "0.1", default-features = false }
 edge-nal = "0.6"
 edge-nal-std = { version = "0.6", optional = true }
