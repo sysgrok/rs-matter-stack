@@ -109,7 +109,7 @@ impl<const N: usize, M: RawMutex> Bump<N, M> {
             let offset = inner.offset;
             let memory = unsafe { inner.memory.assume_init_mut() };
 
-            info!(
+            debug!(
                 "BUMP[{}]: {}b (U:{}b/F:{}b)",
                 location,
                 size,
