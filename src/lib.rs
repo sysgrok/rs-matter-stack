@@ -28,6 +28,8 @@ use rs_matter::crypto::Crypto;
 use rs_matter::dm::clusters::basic_info::BasicInfoConfig;
 use rs_matter::dm::clusters::dev_att::DeviceAttestation;
 use rs_matter::dm::clusters::gen_diag::NetifDiag;
+#[allow(unused)]
+use rs_matter::dm::events::Events;
 use rs_matter::dm::networks::NetChangeNotif;
 use rs_matter::dm::subscriptions::Subscriptions;
 use rs_matter::dm::{
@@ -120,6 +122,31 @@ cfg_if! {
 }
 
 cfg_if! {
+    if #[cfg(feature = "events-ringbuf-size-64")] {
+        /// Events ringbuf size
+        const EVENTS_RINGBUF_SIZE: usize = 64;
+    } else if #[cfg(feature = "events-ringbuf-size-128")] {
+        /// Events ringbuf size
+        const EVENTS_RINGBUF_SIZE: usize = 128;
+    } else if #[cfg(feature = "events-ringbuf-size-256")] {
+        /// Events ringbuf size
+        const EVENTS_RINGBUF_SIZE: usize = 256;
+    } else if #[cfg(feature = "events-ringbuf-size-512")] {
+        /// Events ringbuf size
+        const EVENTS_RINGBUF_SIZE: usize = 512;
+    } else if #[cfg(feature = "events-ringbuf-size-1024")] {
+        /// Events ringbuf size
+        const EVENTS_RINGBUF_SIZE: usize = 1024;
+    } else if #[cfg(feature = "events-ringbuf-size-2048")] {
+        /// Events ringbuf size
+        const EVENTS_RINGBUF_SIZE: usize = 2048;
+    } else {
+        /// Events ringbuf size
+        const EVENTS_RINGBUF_SIZE: usize = 0;
+    }
+}
+
+cfg_if! {
     if #[cfg(feature = "max-im-buffers-64")] {
         /// Max number of IM buffers
         const MAX_IM_BUFFERS: usize = 64;
@@ -195,8 +222,14 @@ cfg_if! {
 
 const MAX_BUSY_RESPONDERS: usize = 2;
 
-pub(crate) type MatterStackDataModel<'a, C, H> =
-    DataModel<'a, MAX_SUBSCRIPTIONS, C, PooledBuffers<MAX_IM_BUFFERS, NoopRawMutex, IMBuffer>, H>;
+pub(crate) type MatterStackDataModel<'a, C, H> = DataModel<
+    'a,
+    MAX_SUBSCRIPTIONS,
+    EVENTS_RINGBUF_SIZE,
+    C,
+    PooledBuffers<MAX_IM_BUFFERS, NoopRawMutex, IMBuffer>,
+    H,
+>;
 
 /// The `MatterStack` struct is the main entry point for the Matter stack.
 ///
@@ -208,6 +241,15 @@ where
     matter: Matter<'a>,
     buffers: PooledBuffers<MAX_IM_BUFFERS, NoopRawMutex, IMBuffer>,
     subscriptions: Subscriptions<MAX_SUBSCRIPTIONS>,
+    #[cfg(any(
+        feature = "events-ringbuf-size-64",
+        feature = "events-ringbuf-size-128",
+        feature = "events-ringbuf-size-256",
+        feature = "events-ringbuf-size-512",
+        feature = "events-ringbuf-size-1024",
+        feature = "events-ringbuf-size-2048"
+    ))]
+    events: Events<EVENTS_RINGBUF_SIZE>,
     store_buf: PooledBuffers<1, NoopRawMutex, KvBlobBuffer>,
     bump: Bump<B, NoopRawMutex>,
     run_lock: IfMutex<NoopRawMutex, ()>,
@@ -250,6 +292,15 @@ where
             matter: Matter::new(dev_det, dev_comm, dev_att, epoch, MATTER_PORT),
             buffers: PooledBuffers::new(0),
             subscriptions: Subscriptions::new(),
+            #[cfg(any(
+                feature = "events-ringbuf-size-64",
+                feature = "events-ringbuf-size-128",
+                feature = "events-ringbuf-size-256",
+                feature = "events-ringbuf-size-512",
+                feature = "events-ringbuf-size-1024",
+                feature = "events-ringbuf-size-2048"
+            ))]
+            events: Events::new(epoch),
             store_buf: PooledBuffers::new(0),
             bump: Bump::new(),
             run_lock: IfMutex::new(()),
@@ -281,7 +332,41 @@ where
         dev_att: &'a dyn DeviceAttestation,
         epoch: Epoch,
     ) -> impl Init<Self> {
-        init!(Self {
+        #[cfg(any(
+            feature = "events-ringbuf-size-64",
+            feature = "events-ringbuf-size-128",
+            feature = "events-ringbuf-size-256",
+            feature = "events-ringbuf-size-512",
+            feature = "events-ringbuf-size-1024",
+            feature = "events-ringbuf-size-2048"
+        ))]
+        let init = init!(Self {
+            matter <- Matter::init(
+                dev_det,
+                dev_comm,
+                dev_att,
+                epoch,
+                MATTER_PORT,
+            ),
+            buffers <- PooledBuffers::init(0),
+            subscriptions <- Subscriptions::init(),
+            events <- Events::init(epoch),
+            store_buf <- PooledBuffers::init(0),
+            bump <- Bump::init(),
+            run_lock <- IfMutex::init(()),
+            network <- N::init(),
+            //netif_conf: Signal::new(None),
+        });
+
+        #[cfg(not(any(
+            feature = "events-ringbuf-size-64",
+            feature = "events-ringbuf-size-128",
+            feature = "events-ringbuf-size-256",
+            feature = "events-ringbuf-size-512",
+            feature = "events-ringbuf-size-1024",
+            feature = "events-ringbuf-size-2048"
+        )))]
+        let init = init!(Self {
             matter <- Matter::init(
                 dev_det,
                 dev_comm,
@@ -296,7 +381,9 @@ where
             run_lock <- IfMutex::init(()),
             network <- N::init(),
             //netif_conf: Signal::new(None),
-        })
+        });
+
+        init
     }
 
     /// A utility method to replace the initial Device Attestation Data Fetcher with another one.
@@ -681,13 +768,41 @@ where
         C: Crypto,
         H: AsyncHandler + AsyncMetadata,
     {
-        MatterStackDataModel::new(
+        #[cfg(any(
+            feature = "events-ringbuf-size-64",
+            feature = "events-ringbuf-size-128",
+            feature = "events-ringbuf-size-256",
+            feature = "events-ringbuf-size-512",
+            feature = "events-ringbuf-size-1024",
+            feature = "events-ringbuf-size-2048"
+        ))]
+        let dm = MatterStackDataModel::new(
             self.matter(),
             crypto,
             &self.buffers,
             &self.subscriptions,
+            Some(&self.events),
             handler,
-        )
+        );
+
+        #[cfg(not(any(
+            feature = "events-ringbuf-size-64",
+            feature = "events-ringbuf-size-128",
+            feature = "events-ringbuf-size-256",
+            feature = "events-ringbuf-size-512",
+            feature = "events-ringbuf-size-1024",
+            feature = "events-ringbuf-size-2048"
+        )))]
+        let dm = MatterStackDataModel::new(
+            self.matter(),
+            crypto,
+            &self.buffers,
+            &self.subscriptions,
+            None,
+            handler,
+        );
+
+        dm
     }
 
     async fn run_dm<C, H>(&self, dm: &MatterStackDataModel<'_, C, H>) -> Result<(), Error>

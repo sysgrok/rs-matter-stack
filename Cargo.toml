@@ -50,6 +50,14 @@ max-subscriptions-3 = [] # default
 max-subscriptions-2 = []
 max-subscriptions-1 = []
 
+# Events ring-bffers' size (no default, i.e. by default events are not supported)
+events-ringbuf-size-64 = []
+events-ringbuf-size-128 = []
+events-ringbuf-size-256 = []
+events-ringbuf-size-512 = []
+events-ringbuf-size-1024 = []
+events-ringbuf-size-2048 = []
+
 # Number of IM buffers
 max-im-buffers-64 = []
 max-im-buffers-32 = []
