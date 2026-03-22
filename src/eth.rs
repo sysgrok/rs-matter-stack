@@ -40,13 +40,19 @@ impl<E> Sealed for Eth<E> {}
 
 impl<E> Network for Eth<E>
 where
-    E: Embedding + 'static,
+    E: Embedding,
 {
     const INIT: Self = Self { embedding: E::INIT };
 
-    type PersistContext<'a> = ();
+    type PersistContext<'a>
+        = ()
+    where
+        E: 'a;
 
-    type Embedding = E;
+    type Embedding<'a>
+        = E
+    where
+        E: 'a;
 
     fn init() -> impl Init<Self> {
         init!(Self {
@@ -60,7 +66,7 @@ where
 
     fn persist_context(&self) -> Self::PersistContext<'_> {}
 
-    fn embedding(&self) -> &Self::Embedding {
+    fn embedding(&self) -> &Self::Embedding<'_> {
         &self.embedding
     }
 }
@@ -153,7 +159,7 @@ where
 /// A specialization of the `MatterStack` for Ethernet.
 impl<const B: usize, E> MatterStack<'_, B, Eth<E>>
 where
-    E: Embedding + 'static,
+    E: Embedding,
 {
     /// Return a metadata for the root (Endpoint 0) of the Matter Node
     /// configured for Ethernet network.
@@ -297,7 +303,7 @@ where
 
 struct MatterStackEthernetTask<'a, const B: usize, E, C, H, X>
 where
-    E: Embedding + 'static,
+    E: Embedding,
     C: Crypto,
     H: AsyncMetadata + AsyncHandler,
     X: UserTask,
@@ -310,7 +316,7 @@ where
 
 impl<const B: usize, E, C, H, X> EthernetTask for MatterStackEthernetTask<'_, B, E, C, H, X>
 where
-    E: Embedding + 'static,
+    E: Embedding,
     C: Crypto,
     H: AsyncMetadata + AsyncHandler,
     X: UserTask,

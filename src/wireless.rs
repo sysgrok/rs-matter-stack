@@ -14,12 +14,13 @@ use rs_matter::dm::networks::NetChangeNotif;
 use rs_matter::dm::ChangeNotify;
 use rs_matter::error::Error;
 use rs_matter::pairing::DiscoveryCapabilities;
-use rs_matter::transport::network::btp::{Btp, BtpContext, GattPeripheral};
+use rs_matter::transport::network::btp::{AdvData, Btp};
 use rs_matter::utils::cell::RefCell;
 use rs_matter::utils::init::{init, zeroed, Init};
 use rs_matter::utils::select::Coalesce;
 use rs_matter::utils::sync::{blocking, IfMutex};
 
+use crate::ble::GattPeripheral;
 use crate::mdns::Mdns;
 use crate::nal::NetStack;
 use crate::network::{Embedding, Network};
@@ -64,7 +65,7 @@ where
     M: RawMutex,
     T: WirelessNetwork,
 {
-    btp_context: BtpContext<M>,
+    btp: Btp,
     networks: WirelessNetworks<MAX_WIRELESS_NETWORKS, M, T>,
     net_state: blocking::Mutex<M, RefCell<NetCtlState>>,
     creds_buf: IfMutex<M, [u8; MAX_CREDS_SIZE]>,
@@ -80,7 +81,7 @@ where
     /// Creates a new instance of the `WirelessBle` network type.
     pub const fn new() -> Self {
         Self {
-            btp_context: BtpContext::new(),
+            btp: Btp::new(),
             networks: WirelessNetworks::new(),
             net_state: NetCtlState::new_with_mutex(),
             creds_buf: IfMutex::new([0; MAX_CREDS_SIZE]),
@@ -91,7 +92,7 @@ where
     /// Return an in-place initializer for the `WirelessBle` network type.
     pub fn init() -> impl Init<Self> {
         init!(Self {
-            btp_context <- BtpContext::init(),
+            btp <- Btp::init(),
             networks <- WirelessNetworks::init(),
             net_state <- NetCtlState::init_with_mutex(),
             creds_buf <- IfMutex::init(zeroed()),
@@ -126,15 +127,21 @@ where
 
 impl<M, T, E> Network for WirelessBle<M, T, E>
 where
-    M: RawMutex + 'static,
+    M: RawMutex,
     T: WirelessNetwork,
-    E: Embedding + 'static,
+    E: Embedding,
 {
     const INIT: Self = Self::new();
 
-    type PersistContext<'a> = &'a WirelessNetworks<MAX_WIRELESS_NETWORKS, M, T>;
+    type PersistContext<'a>
+        = &'a WirelessNetworks<MAX_WIRELESS_NETWORKS, M, T>
+    where
+        Self: 'a;
 
-    type Embedding = E;
+    type Embedding<'a>
+        = E
+    where
+        Self: 'a;
 
     fn init() -> impl Init<Self> {
         WirelessBle::init()
@@ -148,20 +155,20 @@ where
         &self.networks
     }
 
-    fn embedding(&self) -> &Self::Embedding {
+    fn embedding(&self) -> &Self::Embedding<'_> {
         &self.embedding
     }
 }
 
 impl<const B: usize, M, T, E> MatterStack<'_, B, WirelessBle<M, T, E>>
 where
-    M: RawMutex + Send + Sync + 'static,
+    M: RawMutex,
     T: WirelessNetwork,
-    E: Embedding + 'static,
+    E: Embedding,
 {
     #[allow(clippy::too_many_arguments)]
     async fn run_net_coex<C, S, N, D, Q, G>(
-        &'static self,
+        &self,
         crypto: C,
         notify: &dyn ChangeNotify,
         net_stack: S,
@@ -192,13 +199,13 @@ where
     }
 
     async fn run_btp_coex<C, S, N, D, P>(
-        &'static self,
+        &self,
         crypto: C,
         notify: &dyn ChangeNotify,
         net_stack: S,
         netif: N,
         mut mdns: D,
-        peripheral: P,
+        mut peripheral: P,
     ) -> Result<(), Error>
     where
         C: Crypto,
@@ -207,17 +214,18 @@ where
         D: Mdns,
         P: GattPeripheral,
     {
+        info!("BLE driver started");
+
         info!("Running in concurrent commissioning mode (BLE and Wireless)");
 
-        let btp = Btp::new(peripheral, &self.network.btp_context);
+        let adv_data = AdvData::new(
+            self.matter().dev_det(),
+            self.matter().dev_comm().discriminator,
+        );
 
         let mut btp_task = pin_alloc!(
             self.bump,
-            btp.run(
-                "BT",
-                self.matter().dev_det(),
-                self.matter().dev_comm().discriminator,
-            )
+            peripheral.run(&self.network.btp, "BT", &adv_data)
         );
 
         let mut net_task = pin_alloc!(
@@ -226,7 +234,7 @@ where
                 &crypto,
                 &net_stack,
                 core::future::pending(),
-                Some((&btp, &btp))
+                Some((&self.network.btp, &self.network.btp))
             )
         );
 
@@ -240,26 +248,29 @@ where
             .await
     }
 
-    async fn run_btp<C, P>(&'static self, crypto: C, peripheral: P) -> Result<(), Error>
+    async fn run_btp<C, P>(&self, crypto: C, mut peripheral: P) -> Result<(), Error>
     where
         C: Crypto,
         P: GattPeripheral,
     {
-        let btp = Btp::new(peripheral, &self.network.btp_context);
-
         info!("BLE driver started");
 
         info!("Running in non-concurrent commissioning mode (BLE only)");
 
-        let mut btp_task = pin!(btp.run(
-            "BT",
+        let adv_data = AdvData::new(
             self.matter().dev_det(),
             self.matter().dev_comm().discriminator,
-        ));
+        );
 
-        let mut net_task = pin!(self.run_transport_net(&crypto, &btp, &btp));
+        let mut btp_task = pin_alloc!(
+            self.bump,
+            peripheral.run(&self.network.btp, "BT", &adv_data)
+        );
+
+        let mut net_task =
+            pin!(self.run_transport_net(&crypto, &self.network.btp, &self.network.btp));
         let mut oper_net_act_task = pin!(async {
-            NetCtlState::wait_prov_ready(&self.network.net_state, &btp).await;
+            NetCtlState::wait_prov_ready(&self.network.net_state, &self.network.btp).await;
 
             // TODO: Workaround for a bug in the `esp-wifi` BLE stack:
             // ====================== PANIC ======================
@@ -305,9 +316,9 @@ impl<S, N, C, M, G> PreexistingWireless<S, N, C, M, G> {
 
 pub(crate) struct MatterStackWirelessTask<'a, const B: usize, M, T, E, C, H, U>
 where
-    M: RawMutex + Send + Sync + 'static,
+    M: RawMutex,
     T: WirelessNetwork,
-    E: Embedding + 'static,
+    E: Embedding,
 {
     stack: &'a MatterStack<'a, B, WirelessBle<M, T, E>>,
     crypto: C,

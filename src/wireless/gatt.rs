@@ -1,7 +1,8 @@
 use core::future::Future;
 
 use rs_matter::error::Error;
-use rs_matter::transport::network::btp::GattPeripheral;
+
+use crate::ble::GattPeripheral;
 
 use super::PreexistingWireless;
 

@@ -17,7 +17,6 @@ use rs_matter::dm::networks::NetChangeNotif;
 use rs_matter::dm::{clusters::gen_diag::NetifDiag, AsyncHandler};
 use rs_matter::dm::{AsyncMetadata, Endpoint};
 use rs_matter::error::Error;
-use rs_matter::transport::network::btp::GattPeripheral;
 use rs_matter::transport::network::NoNetwork;
 use rs_matter::utils::select::Coalesce;
 
@@ -25,7 +24,7 @@ use crate::mdns::Mdns;
 use crate::nal::NetStack;
 use crate::network::Embedding;
 use crate::persist::KvBlobStore;
-use crate::wireless::{GattTask, MatterStackWirelessTask, WirelessMatterPersist};
+use crate::wireless::{GattPeripheral, GattTask, MatterStackWirelessTask, WirelessMatterPersist};
 use crate::{pin_alloc, UserTask};
 
 use super::{Gatt, PreexistingWireless, WirelessMatterStack};
@@ -39,8 +38,8 @@ pub type ThreadMatterPersist<'a, S, M> = WirelessMatterPersist<'a, S, M, wireles
 
 impl<const B: usize, M, E> WirelessMatterStack<'_, B, M, wireless::Thread, E>
 where
-    M: RawMutex + Send + Sync + 'static,
-    E: Embedding + 'static,
+    M: RawMutex,
+    E: Embedding,
 {
     /// Run the Matter stack for an already pre-established wireless network where the BLE and the Thread stacks can co-exist.
     ///
@@ -56,7 +55,7 @@ where
     /// - `user` - a user-provided future that will be polled only when the netif interface is up
     #[allow(clippy::too_many_arguments)]
     pub fn run_preex<'t, U, N, Q, D, G, S, C, H, X>(
-        &'static self,
+        &'t self,
         net_stack: U,
         netif: N,
         net_ctl: Q,
@@ -96,7 +95,7 @@ where
     /// - `handler` - a user-provided DM handler implementation
     /// - `user` - a user-provided future that will be polled only when the netif interface is up
     pub async fn run_coex<W, S, C, H, U>(
-        &'static self,
+        &self,
         mut thread: W,
         persist: &ThreadMatterPersist<'_, S, M>,
         crypto: C,
@@ -140,7 +139,7 @@ where
     /// - `handler` - a user-provided DM handler implementation
     /// - `user` - a user-provided future that will be polled only when the netif interface is up
     pub async fn run<W, S, C, H, U>(
-        &'static self,
+        &self,
         thread: W,
         persist: &ThreadMatterPersist<'_, S, M>,
         crypto: C,
@@ -173,7 +172,7 @@ where
     }
 
     fn run_thread_coex<'t, W, C, H, U>(
-        &'static self,
+        &'t self,
         thread: &'t mut W,
         crypto: C,
         handler: H,
@@ -194,7 +193,7 @@ where
     }
 
     async fn run_thread<W, C, H, U>(
-        &'static self,
+        &self,
         mut thread: W,
         crypto: C,
         handler: H,
@@ -448,11 +447,11 @@ where
     }
 }
 
-impl<const B: usize, M, E, C, H, X> GattTask
-    for MatterStackWirelessTask<'static, B, M, wireless::Thread, E, C, H, X>
+impl<'a, const B: usize, M, E, C, H, X> GattTask
+    for MatterStackWirelessTask<'a, B, M, wireless::Thread, E, C, H, X>
 where
-    M: RawMutex + Send + Sync + 'static,
-    E: Embedding + 'static,
+    M: RawMutex,
+    E: Embedding,
     C: Crypto,
     H: AsyncMetadata + AsyncHandler,
 {
@@ -483,11 +482,11 @@ where
     }
 }
 
-impl<const B: usize, M, E, C, H, X> ThreadTask
-    for MatterStackWirelessTask<'static, B, M, wireless::Thread, E, C, H, X>
+impl<'a, const B: usize, M, E, C, H, X> ThreadTask
+    for MatterStackWirelessTask<'a, B, M, wireless::Thread, E, C, H, X>
 where
-    M: RawMutex + Send + Sync + 'static,
-    E: Embedding + 'static,
+    M: RawMutex,
+    E: Embedding,
     C: Crypto,
     H: AsyncMetadata + AsyncHandler,
     X: UserTask,
@@ -552,11 +551,11 @@ where
     }
 }
 
-impl<const B: usize, M, E, C, H, X> ThreadCoexTask
-    for MatterStackWirelessTask<'static, B, M, wireless::Thread, E, C, H, X>
+impl<'a, const B: usize, M, E, C, H, X> ThreadCoexTask
+    for MatterStackWirelessTask<'a, B, M, wireless::Thread, E, C, H, X>
 where
-    M: RawMutex + Send + Sync + 'static,
-    E: Embedding + 'static,
+    M: RawMutex,
+    E: Embedding,
     C: Crypto,
     H: AsyncMetadata + AsyncHandler,
     X: UserTask,
