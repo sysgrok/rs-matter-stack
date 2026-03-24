@@ -64,7 +64,6 @@ The [`esp-idf-matter`](https://github.com/ivmarkov/esp-idf-matter) crate provide
 
 use core::pin::pin;
 
-use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use log::info;
 
 use rs_matter::crypto::{default_crypto, Crypto};
@@ -118,7 +117,7 @@ fn main() -> Result<(), Error> {
         ));
 
     // The default crypto provider
-    let crypto = default_crypto::<NoopRawMutex, _>(rand::thread_rng(), DAC_PRIVKEY);
+    let crypto = default_crypto(rand::thread_rng(), DAC_PRIVKEY);
 
     let mut rand = crypto.weak_rand()?;
 

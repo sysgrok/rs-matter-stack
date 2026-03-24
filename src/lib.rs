@@ -19,7 +19,6 @@ use cfg_if::cfg_if;
 use edge_nal::{UdpBind, UdpSplit};
 
 use embassy_futures::select::{select, select3, select_slice};
-use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_time::Duration;
 
 use persist::{KvBlobBuffer, KvBlobStore, MatterPersist, NetworkPersist};
@@ -228,7 +227,7 @@ pub(crate) type MatterStackDataModel<'a, C, H> = DataModel<
     MAX_SUBSCRIPTIONS,
     EVENTS_RINGBUF_SIZE,
     C,
-    PooledBuffers<MAX_IM_BUFFERS, NoopRawMutex, IMBuffer>,
+    PooledBuffers<MAX_IM_BUFFERS, IMBuffer>,
     H,
 >;
 
@@ -240,7 +239,7 @@ where
     N: Network,
 {
     matter: Matter<'a>,
-    buffers: PooledBuffers<MAX_IM_BUFFERS, NoopRawMutex, IMBuffer>,
+    buffers: PooledBuffers<MAX_IM_BUFFERS, IMBuffer>,
     subscriptions: Subscriptions<MAX_SUBSCRIPTIONS>,
     #[cfg(any(
         feature = "events-ringbuf-size-64",
@@ -251,12 +250,12 @@ where
         feature = "events-ringbuf-size-2048"
     ))]
     events: Events<EVENTS_RINGBUF_SIZE>,
-    store_buf: PooledBuffers<1, NoopRawMutex, KvBlobBuffer>,
-    bump: Bump<B, NoopRawMutex>,
-    run_lock: IfMutex<NoopRawMutex, ()>,
+    store_buf: PooledBuffers<1, KvBlobBuffer>,
+    bump: Bump<B>,
+    run_lock: IfMutex<()>,
     #[allow(unused)]
     network: N,
-    //netif_conf: Signal<NoopRawMutex, Option<NetifConf>>,
+    //netif_conf: Signal<Option<NetifConf>>,
 }
 
 impl<'a, const B: usize, N> MatterStack<'a, B, N>
@@ -472,7 +471,7 @@ where
         &self.matter
     }
 
-    pub const fn store_buf(&self) -> &PooledBuffers<1, NoopRawMutex, KvBlobBuffer> {
+    pub const fn store_buf(&self) -> &PooledBuffers<1, KvBlobBuffer> {
         &self.store_buf
     }
 
@@ -924,7 +923,7 @@ where
         S: NetworkSend + 't,
         R: NetworkReceive + 't,
     {
-        self.matter().run_transport(crypto, send, recv)
+        self.matter().run(crypto, send, recv)
     }
 }
 

@@ -2,7 +2,6 @@ use core::future::Future;
 use core::pin::pin;
 
 use embassy_futures::select::{select, select3, select4};
-use embassy_sync::blocking_mutex::raw::RawMutex;
 
 use rs_matter::crypto::{Crypto, RngCore};
 use rs_matter::dm::clusters::gen_comm::CommPolicy;
@@ -30,15 +29,14 @@ use crate::{pin_alloc, UserTask};
 use super::{Gatt, GattTask, PreexistingWireless, WirelessMatterStack};
 
 /// A type alias for a Matter stack running over Wifi (and BLE, during commissioning).
-pub type WifiMatterStack<'a, const B: usize, M, E = ()> =
-    WirelessMatterStack<'a, B, M, wireless::Wifi, E>;
+pub type WifiMatterStack<'a, const B: usize, E = ()> =
+    WirelessMatterStack<'a, B, wireless::Wifi, E>;
 
 /// A type alias for the Matter Persister created by calling `WifiMatterStack::create_persist`.
-pub type WifiMatterPersist<'a, S, M> = WirelessMatterPersist<'a, S, M, wireless::Wifi>;
+pub type WifiMatterPersist<'a, S> = WirelessMatterPersist<'a, S, wireless::Wifi>;
 
-impl<const B: usize, M, E> WirelessMatterStack<'_, B, M, wireless::Wifi, E>
+impl<const B: usize, E> WirelessMatterStack<'_, B, wireless::Wifi, E>
 where
-    M: RawMutex,
     E: Embedding,
 {
     /// Run the Matter stack for an already pre-established wireless network where the BLE and the Wifi stacks can co-exist.
@@ -61,7 +59,7 @@ where
         net_ctl: Q,
         mdns: D,
         gatt: G,
-        persist: &'t WifiMatterPersist<'_, S, M>,
+        persist: &'t WifiMatterPersist<'_, S>,
         crypto: C,
         handler: H,
         user: X,
@@ -97,7 +95,7 @@ where
     pub async fn run_coex<W, S, C, H, U>(
         &self,
         mut wifi: W,
-        persist: &WifiMatterPersist<'_, S, M>,
+        persist: &WifiMatterPersist<'_, S>,
         crypto: C,
         handler: H,
         user: U,
@@ -141,7 +139,7 @@ where
     pub async fn run<W, S, C, H, U>(
         &self,
         wifi: W,
-        persist: &WifiMatterPersist<'_, S, M>,
+        persist: &WifiMatterPersist<'_, S>,
         crypto: C,
         handler: H,
         user: U,
@@ -447,10 +445,9 @@ where
     }
 }
 
-impl<'a, const B: usize, M, E, C, H, U> GattTask
-    for MatterStackWirelessTask<'a, B, M, wireless::Wifi, E, C, H, U>
+impl<'a, const B: usize, E, C, H, U> GattTask
+    for MatterStackWirelessTask<'a, B, wireless::Wifi, E, C, H, U>
 where
-    M: RawMutex,
     E: Embedding,
     C: Crypto,
     H: AsyncMetadata + AsyncHandler,
@@ -482,10 +479,9 @@ where
     }
 }
 
-impl<'a, const B: usize, M, E, C, H, X> WifiTask
-    for MatterStackWirelessTask<'a, B, M, wireless::Wifi, E, C, H, X>
+impl<'a, const B: usize, E, C, H, X> WifiTask
+    for MatterStackWirelessTask<'a, B, wireless::Wifi, E, C, H, X>
 where
-    M: RawMutex,
     E: Embedding,
     C: Crypto,
     H: AsyncMetadata + AsyncHandler,
@@ -551,10 +547,9 @@ where
     }
 }
 
-impl<'a, const B: usize, M, E, C, H, X> WifiCoexTask
-    for MatterStackWirelessTask<'a, B, M, wireless::Wifi, E, C, H, X>
+impl<'a, const B: usize, E, C, H, X> WifiCoexTask
+    for MatterStackWirelessTask<'a, B, wireless::Wifi, E, C, H, X>
 where
-    M: RawMutex,
     E: Embedding,
     C: Crypto,
     H: AsyncMetadata + AsyncHandler,

@@ -2,7 +2,6 @@ use core::future::Future;
 use core::pin::pin;
 
 use embassy_futures::select::{select, select3, select4};
-use embassy_sync::blocking_mutex::raw::RawMutex;
 
 use rs_matter::crypto::{Crypto, RngCore};
 use rs_matter::dm::clusters::gen_comm::CommPolicy;
@@ -30,15 +29,14 @@ use crate::{pin_alloc, UserTask};
 use super::{Gatt, PreexistingWireless, WirelessMatterStack};
 
 /// A type alias for a Matter stack running over Thread (and BLE, during commissioning).
-pub type ThreadMatterStack<'a, const B: usize, M, E = ()> =
-    WirelessMatterStack<'a, B, M, wireless::Thread, E>;
+pub type ThreadMatterStack<'a, const B: usize, E = ()> =
+    WirelessMatterStack<'a, B, wireless::Thread, E>;
 
 /// A type alias for the Matter Persister created by calling `ThreadMatterStack::create_persist`.
-pub type ThreadMatterPersist<'a, S, M> = WirelessMatterPersist<'a, S, M, wireless::Thread>;
+pub type ThreadMatterPersist<'a, S> = WirelessMatterPersist<'a, S, wireless::Thread>;
 
-impl<const B: usize, M, E> WirelessMatterStack<'_, B, M, wireless::Thread, E>
+impl<const B: usize, E> WirelessMatterStack<'_, B, wireless::Thread, E>
 where
-    M: RawMutex,
     E: Embedding,
 {
     /// Run the Matter stack for an already pre-established wireless network where the BLE and the Thread stacks can co-exist.
@@ -61,7 +59,7 @@ where
         net_ctl: Q,
         mdns: D,
         gatt: G,
-        persist: &'t ThreadMatterPersist<'_, S, M>,
+        persist: &'t ThreadMatterPersist<'_, S>,
         crypto: C,
         handler: H,
         user: X,
@@ -90,14 +88,14 @@ where
     ///
     /// # Arguments
     /// - `thread` - a user-provided `ThreadCoex` implementation
-    /// - `persist` - a `WifiMatterPersist` implementation instantiated on the stack with `create_persist`
+    /// - `persist` - a `ThreadMatterPersist` implementation instantiated on the stack with `create_persist`
     /// - `crypto` - a user-provided `Crypto` implementation
     /// - `handler` - a user-provided DM handler implementation
     /// - `user` - a user-provided future that will be polled only when the netif interface is up
     pub async fn run_coex<W, S, C, H, U>(
         &self,
         mut thread: W,
-        persist: &ThreadMatterPersist<'_, S, M>,
+        persist: &ThreadMatterPersist<'_, S>,
         crypto: C,
         handler: H,
         user: U,
@@ -134,14 +132,14 @@ where
     ///
     /// # Arguments
     /// - `thread` - a user-provided `Thread` + `Gatt` implementation
-    /// - `persist` - a `WifiMatterPersist` implementation instantiated on the stack with `create_persist`
+    /// - `persist` - a `ThreadMatterPersist` implementation instantiated on the stack with `create_persist`
     /// - `crypto` - a user-provided `Crypto` implementation
     /// - `handler` - a user-provided DM handler implementation
     /// - `user` - a user-provided future that will be polled only when the netif interface is up
     pub async fn run<W, S, C, H, U>(
         &self,
         thread: W,
-        persist: &ThreadMatterPersist<'_, S, M>,
+        persist: &ThreadMatterPersist<'_, S>,
         crypto: C,
         handler: H,
         user: U,
@@ -447,10 +445,9 @@ where
     }
 }
 
-impl<'a, const B: usize, M, E, C, H, X> GattTask
-    for MatterStackWirelessTask<'a, B, M, wireless::Thread, E, C, H, X>
+impl<'a, const B: usize, E, C, H, X> GattTask
+    for MatterStackWirelessTask<'a, B, wireless::Thread, E, C, H, X>
 where
-    M: RawMutex,
     E: Embedding,
     C: Crypto,
     H: AsyncMetadata + AsyncHandler,
@@ -482,10 +479,9 @@ where
     }
 }
 
-impl<'a, const B: usize, M, E, C, H, X> ThreadTask
-    for MatterStackWirelessTask<'a, B, M, wireless::Thread, E, C, H, X>
+impl<'a, const B: usize, E, C, H, X> ThreadTask
+    for MatterStackWirelessTask<'a, B, wireless::Thread, E, C, H, X>
 where
-    M: RawMutex,
     E: Embedding,
     C: Crypto,
     H: AsyncMetadata + AsyncHandler,
@@ -551,10 +547,9 @@ where
     }
 }
 
-impl<'a, const B: usize, M, E, C, H, X> ThreadCoexTask
-    for MatterStackWirelessTask<'a, B, M, wireless::Thread, E, C, H, X>
+impl<'a, const B: usize, E, C, H, X> ThreadCoexTask
+    for MatterStackWirelessTask<'a, B, wireless::Thread, E, C, H, X>
 where
-    M: RawMutex,
     E: Embedding,
     C: Crypto,
     H: AsyncMetadata + AsyncHandler,

@@ -1,8 +1,8 @@
 use core::fmt::Display;
 
 use cfg_if::cfg_if;
+
 use embassy_futures::select::select;
-use embassy_sync::blocking_mutex::raw::{NoopRawMutex, RawMutex};
 
 use rs_matter::dm::networks::wireless::{WirelessNetwork, WirelessNetworks};
 use rs_matter::error::Error;
@@ -175,11 +175,10 @@ pub trait NetworkPersist: Sealed {
     async fn wait_state_changed(&self);
 }
 
-impl<const N: usize, M, T> Sealed for &WirelessNetworks<N, M, T> where M: RawMutex {}
+impl<const N: usize, T> Sealed for &WirelessNetworks<N, T> {}
 
-impl<const N: usize, M, T> NetworkPersist for &WirelessNetworks<N, M, T>
+impl<const N: usize, T> NetworkPersist for &WirelessNetworks<N, T>
 where
-    M: RawMutex,
     T: WirelessNetwork,
 {
     fn reset(&self, flag_changed: bool) {
@@ -364,8 +363,8 @@ impl KvBlobStore for DummyKvBlobStore {
 
 /// A shared wrapper around a `KvBlobStore` instance.
 pub struct SharedKvBlobStore<'a, S> {
-    store: IfMutex<NoopRawMutex, S>,
-    buf: &'a PooledBuffers<1, NoopRawMutex, KvBlobBuffer>,
+    store: IfMutex<S>,
+    buf: &'a PooledBuffers<1, KvBlobBuffer>,
 }
 
 impl<'a, S> SharedKvBlobStore<'a, S>
@@ -377,7 +376,7 @@ where
     /// # Arguments
     /// - `store` - the wrapped `KvBlobStore` instance
     /// - `buf` - the wrapped buffer
-    pub const fn new(store: S, buf: &'a PooledBuffers<1, NoopRawMutex, KvBlobBuffer>) -> Self {
+    pub const fn new(store: S, buf: &'a PooledBuffers<1, KvBlobBuffer>) -> Self {
         Self {
             store: IfMutex::new(store),
             buf,
@@ -387,12 +386,7 @@ where
     /// Get the wrapped `KvBlobStore` instance and the wrapped buffer.
     ///
     /// If necessary, awaits the buffer to be available.
-    pub async fn get(
-        &self,
-    ) -> (
-        IfMutexGuard<'_, NoopRawMutex, S>,
-        PooledBuffer<'_, 1, NoopRawMutex, KvBlobBuffer>,
-    ) {
+    pub async fn get(&self) -> (IfMutexGuard<'_, S>, PooledBuffer<'_, 1, KvBlobBuffer>) {
         let store = self.store.lock().await;
         let mut buf = unwrap!(self.buf.get().await);
 

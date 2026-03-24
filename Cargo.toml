@@ -14,7 +14,8 @@ rust-version = "1.77"
 
 [patch.crates-io]
 #rs-matter = { git = "https://github.com/project-chip/rs-matter" }
-rs-matter = { git = "https://github.com/sysgrok/rs-matter", branch = "next" }
+#rs-matter = { git = "https://github.com/sysgrok/rs-matter", branch = "next" }
+rs-matter = { git = "https://github.com/sysgrok/rs-matter", branch = "single-lock-3" }
 #rs-matter = { path = "../rs-matter/rs-matter" }
 #edge-nal = { git = "https://github.com/sysgrok/edge-net" }
 #edge-nal-std = { git = "https://github.com/sysgrok/edge-net" }
@@ -164,6 +165,7 @@ max-exchanges-per-session-3 = ["rs-matter/max-exchanges-per-session-3"]
 # General
 log = ["dep:log", "rs-matter/log", "edge-mdns?/log"]
 defmt = ["dep:defmt", "rs-matter/defmt", "heapless/defmt-03", "edge-mdns?/defmt"]
+sync-mutex = ["rs-matter/sync-mutex"]
 zbus = ["rs-matter/zbus"]
 zeroconf = ["os", "rs-matter/zeroconf"]
 astro-dnssd = ["os", "rs-matter/astro-dnssd"]

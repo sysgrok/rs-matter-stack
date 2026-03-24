@@ -10,7 +10,6 @@
 
 use core::pin::pin;
 
-use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use log::info;
 
 use rs_matter::crypto::{default_crypto, Crypto};
@@ -29,7 +28,6 @@ use rs_matter_stack::matter::dm::{Async, Dataver, Endpoint, Node};
 use rs_matter_stack::matter::dm::{EmptyHandler, EpClMatcher};
 use rs_matter_stack::matter::error::Error;
 use rs_matter_stack::matter::utils::init::InitMaybeUninit;
-use rs_matter_stack::matter::utils::sync::blocking::raw::StdRawMutex;
 use rs_matter_stack::matter::{clusters, devices};
 use rs_matter_stack::mdns::ZeroconfMdns;
 use rs_matter_stack::persist::DirKvBlobStore;
@@ -68,7 +66,7 @@ fn main() -> Result<(), Error> {
         ));
 
     // The default crypto provider
-    let crypto = default_crypto::<NoopRawMutex, _>(rand::thread_rng(), DAC_PRIVKEY);
+    let crypto = default_crypto(rand::thread_rng(), DAC_PRIVKEY);
 
     let mut rand = crypto.weak_rand()?;
 
@@ -135,7 +133,7 @@ fn main() -> Result<(), Error> {
 /// The Matter stack is allocated statically to avoid
 /// program stack blowups.
 /// It is also a mandatory requirement when the `WifiBle` stack variation is used.
-static MATTER_STACK: StaticCell<WifiMatterStack<BUMP_SIZE, StdRawMutex>> = StaticCell::new();
+static MATTER_STACK: StaticCell<WifiMatterStack<BUMP_SIZE>> = StaticCell::new();
 
 /// Endpoint 0 (the root endpoint) always runs
 /// the hidden Matter system clusters, so we pick ID=1
@@ -145,7 +143,7 @@ const LIGHT_ENDPOINT_ID: u16 = 1;
 const NODE: Node = Node {
     id: 0,
     endpoints: &[
-        WifiMatterStack::<0, StdRawMutex, ()>::root_endpoint(),
+        WifiMatterStack::<0, ()>::root_endpoint(),
         Endpoint {
             id: LIGHT_ENDPOINT_ID,
             device_types: devices!(DEV_TYPE_ON_OFF_LIGHT),
