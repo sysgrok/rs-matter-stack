@@ -207,18 +207,28 @@ impl<'a> AvahiMdns<'a> {
         Self { connection }
     }
 
-    pub async fn run(&mut self, matter: &Matter<'_>) -> Result<(), Error> {
+    pub async fn run<C>(
+        &mut self,
+        matter: &Matter<'_>,
+        crypto: C,
+        notify: &dyn ChangeNotify,
+    ) -> Result<(), Error>
+    where
+        C: Crypto,
+    {
         rs_matter::transport::network::mdns::avahi::AvahiMdnsResponder::new(matter)
-            .run(self.connection)
+            .run(self.connection, crypto, notify)
             .await
     }
 }
 
 #[cfg(feature = "zbus")]
 impl Mdns for AvahiMdns<'_> {
-    fn run<U>(
+    fn run<C, U>(
         &mut self,
         matter: &Matter<'_>,
+        crypto: C,
+        notify: &dyn ChangeNotify,
         _udp: U,
         _mac: &[u8],
         _ipv4: Ipv4Addr,
@@ -226,9 +236,10 @@ impl Mdns for AvahiMdns<'_> {
         _interface: u32,
     ) -> impl Future<Output = Result<(), Error>>
     where
+        C: Crypto,
         U: UdpBind,
     {
-        Self::run(self, matter)
+        Self::run(self, matter, crypto, notify)
     }
 }
 
@@ -245,18 +256,28 @@ impl<'a> ResolveMdns<'a> {
         Self { connection }
     }
 
-    pub async fn run(&mut self, matter: &Matter<'_>) -> Result<(), Error> {
+    pub async fn run<C>(
+        &mut self,
+        matter: &Matter<'_>,
+        crypto: C,
+        notify: &dyn ChangeNotify,
+    ) -> Result<(), Error>
+    where
+        C: Crypto,
+    {
         rs_matter::transport::network::mdns::resolve::ResolveMdnsResponder::new(matter)
-            .run(self.connection)
+            .run(self.connection, crypto, notify)
             .await
     }
 }
 
 #[cfg(feature = "zbus")]
 impl Mdns for ResolveMdns<'_> {
-    fn run<U>(
+    fn run<C, U>(
         &mut self,
         matter: &Matter<'_>,
+        crypto: C,
+        notify: &dyn ChangeNotify,
         _udp: U,
         _mac: &[u8],
         _ipv4: Ipv4Addr,
@@ -264,9 +285,10 @@ impl Mdns for ResolveMdns<'_> {
         _interface: u32,
     ) -> impl Future<Output = Result<(), Error>>
     where
+        C: Crypto,
         U: UdpBind,
     {
-        Self::run(self, matter)
+        Self::run(self, matter, crypto, notify)
     }
 }
 
@@ -315,18 +337,28 @@ pub struct AstroMdns;
 
 #[cfg(feature = "astro-dnssd")]
 impl AstroMdns {
-    pub async fn run(&mut self, matter: &Matter<'_>) -> Result<(), Error> {
+    pub async fn run<C>(
+        &mut self,
+        matter: &Matter<'_>,
+        crypto: C,
+        notify: &dyn ChangeNotify,
+    ) -> Result<(), Error>
+    where
+        C: Crypto,
+    {
         rs_matter::transport::network::mdns::astro::AstroMdnsResponder::new(matter)
-            .run()
+            .run(crypto, notify)
             .await
     }
 }
 
 #[cfg(feature = "astro-dnssd")]
 impl Mdns for AstroMdns {
-    async fn run<U>(
+    async fn run<C, U>(
         &mut self,
         matter: &Matter<'_>,
+        crypto: C,
+        notify: &dyn ChangeNotify,
         _udp: U,
         _mac: &[u8],
         _ipv4: Ipv4Addr,
@@ -334,9 +366,10 @@ impl Mdns for AstroMdns {
         _interface: u32,
     ) -> Result<(), Error>
     where
+        C: Crypto,
         U: UdpBind,
     {
-        Self::run(self, matter).await
+        Self::run(self, matter, crypto, notify).await
     }
 }
 

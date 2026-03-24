@@ -65,6 +65,7 @@ extern crate alloc;
 // This mod MUST go first, so that the others see its macros.
 pub(crate) mod fmt;
 
+pub mod ble;
 pub mod bump;
 pub mod eth;
 pub mod matter;

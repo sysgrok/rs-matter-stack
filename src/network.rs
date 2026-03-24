@@ -32,7 +32,9 @@ pub trait Network: Sealed {
         Self: 'a;
 
     /// Optional additional state embedded in the network state
-    type Embedding: Embedding + 'static;
+    type Embedding<'a>: Embedding
+    where
+        Self: 'a;
 
     /// Return an in-place initializer for the network type.
     fn init() -> impl Init<Self>;
@@ -44,5 +46,5 @@ pub trait Network: Sealed {
     fn persist_context(&self) -> Self::PersistContext<'_>;
 
     /// Return a reference to the embedded user data.
-    fn embedding(&self) -> &Self::Embedding;
+    fn embedding(&self) -> &Self::Embedding<'_>;
 }
