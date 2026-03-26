@@ -1,7 +1,6 @@
 use core::pin::pin;
 
 use embassy_futures::select::{select, select3};
-use embassy_sync::blocking_mutex::raw::RawMutex;
 
 use rs_matter::crypto::Crypto;
 use rs_matter::dm::clusters::gen_diag::NetifDiag;
@@ -39,14 +38,12 @@ mod wifi;
 const MAX_WIRELESS_NETWORKS: usize = 2;
 
 /// A type alias for a Matter stack running over either Wifi or Thread (and BLE, during commissioning).
-pub type WirelessMatterStack<'a, const B: usize, M, T, E = ()> =
-    MatterStack<'a, B, WirelessBle<M, T, E>>;
+pub type WirelessMatterStack<'a, const B: usize, T, E = ()> = MatterStack<'a, B, WirelessBle<T, E>>;
 
 /// A type alias for the Matter Persister created by calling `WirelessMatterStack::create_persist`.
-pub type WirelessMatterPersist<'a, S, M, T> =
-    MatterPersist<'a, S, WirelessPersistContext<'a, M, T>>;
+pub type WirelessMatterPersist<'a, S, T> = MatterPersist<'a, S, WirelessPersistContext<'a, T>>;
 
-type WirelessPersistContext<'a, M, T> = &'a WirelessNetworks<MAX_WIRELESS_NETWORKS, M, T>;
+type WirelessPersistContext<'a, T> = &'a WirelessNetworks<MAX_WIRELESS_NETWORKS, T>;
 
 /// An implementation of the `Network` trait for a Matter stack running over
 /// BLE during commissioning, and then over either WiFi or Thread when operating.
@@ -60,21 +57,19 @@ type WirelessPersistContext<'a, M, T> = &'a WirelessNetworks<MAX_WIRELESS_NETWOR
 ///
 /// This is done to save memory and to avoid the usage of BLE+Wifi/Thread co-exist drivers on
 /// devices which share a single wireless radio for both BLE and Wifi/Thread.
-pub struct WirelessBle<M, T, E = ()>
+pub struct WirelessBle<T, E = ()>
 where
-    M: RawMutex,
     T: WirelessNetwork,
 {
     btp: Btp,
-    networks: WirelessNetworks<MAX_WIRELESS_NETWORKS, M, T>,
-    net_state: blocking::Mutex<M, RefCell<NetCtlState>>,
-    creds_buf: IfMutex<M, [u8; MAX_CREDS_SIZE]>,
+    networks: WirelessNetworks<MAX_WIRELESS_NETWORKS, T>,
+    net_state: blocking::Mutex<RefCell<NetCtlState>>,
+    creds_buf: IfMutex<[u8; MAX_CREDS_SIZE]>,
     embedding: E,
 }
 
-impl<M, T, E> WirelessBle<M, T, E>
+impl<T, E> WirelessBle<T, E>
 where
-    M: RawMutex,
     T: WirelessNetwork,
     E: Embedding,
 {
@@ -101,14 +96,13 @@ where
     }
 
     /// Return a reference to the networks storage.
-    pub fn networks(&self) -> &WirelessNetworks<MAX_WIRELESS_NETWORKS, M, T> {
+    pub fn networks(&self) -> &WirelessNetworks<MAX_WIRELESS_NETWORKS, T> {
         &self.networks
     }
 }
 
-impl<M, T, E> Default for WirelessBle<M, T, E>
+impl<T, E> Default for WirelessBle<T, E>
 where
-    M: RawMutex,
     T: WirelessNetwork,
     E: Embedding,
 {
@@ -117,24 +111,22 @@ where
     }
 }
 
-impl<M, T, E> Sealed for WirelessBle<M, T, E>
+impl<T, E> Sealed for WirelessBle<T, E>
 where
-    M: RawMutex,
     T: WirelessNetwork,
     E: Embedding,
 {
 }
 
-impl<M, T, E> Network for WirelessBle<M, T, E>
+impl<T, E> Network for WirelessBle<T, E>
 where
-    M: RawMutex,
     T: WirelessNetwork,
     E: Embedding,
 {
     const INIT: Self = Self::new();
 
     type PersistContext<'a>
-        = &'a WirelessNetworks<MAX_WIRELESS_NETWORKS, M, T>
+        = &'a WirelessNetworks<MAX_WIRELESS_NETWORKS, T>
     where
         Self: 'a;
 
@@ -160,9 +152,8 @@ where
     }
 }
 
-impl<const B: usize, M, T, E> MatterStack<'_, B, WirelessBle<M, T, E>>
+impl<const B: usize, T, E> MatterStack<'_, B, WirelessBle<T, E>>
 where
-    M: RawMutex,
     T: WirelessNetwork,
     E: Embedding,
 {
@@ -314,13 +305,12 @@ impl<S, N, C, M, G> PreexistingWireless<S, N, C, M, G> {
     }
 }
 
-pub(crate) struct MatterStackWirelessTask<'a, const B: usize, M, T, E, C, H, U>
+pub(crate) struct MatterStackWirelessTask<'a, const B: usize, T, E, C, H, U>
 where
-    M: RawMutex,
     T: WirelessNetwork,
     E: Embedding,
 {
-    stack: &'a MatterStack<'a, B, WirelessBle<M, T, E>>,
+    stack: &'a MatterStack<'a, B, WirelessBle<T, E>>,
     crypto: C,
     handler: H,
     user_task: U,

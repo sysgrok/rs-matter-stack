@@ -14,6 +14,7 @@ use core::ptr::NonNull;
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use rs_matter::utils::cell::RefCell;
 use rs_matter::utils::init::{init, zeroed, Init};
+use rs_matter::utils::sync::blocking::raw::MatterRawMutex;
 use rs_matter::utils::sync::blocking::Mutex;
 
 #[macro_export]
@@ -31,8 +32,8 @@ macro_rules! pin_alloc {
 }
 
 /// A bump allocator that uses a provided memory chunk
-pub struct Bump<const N: usize, M> {
-    inner: Mutex<M, RefCell<Inner<N>>>,
+pub struct Bump<const N: usize, M = MatterRawMutex> {
+    inner: Mutex<RefCell<Inner<N>>, M>,
 }
 
 impl<const N: usize, M: RawMutex> Default for Bump<N, M> {
