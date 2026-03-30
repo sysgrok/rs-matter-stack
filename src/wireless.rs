@@ -14,6 +14,7 @@ use rs_matter::dm::ChangeNotify;
 use rs_matter::error::Error;
 use rs_matter::pairing::DiscoveryCapabilities;
 use rs_matter::transport::network::btp::{AdvData, Btp};
+use rs_matter::transport::network::NoNetwork;
 use rs_matter::utils::cell::RefCell;
 use rs_matter::utils::init::{init, zeroed, Init};
 use rs_matter::utils::select::Coalesce;
@@ -224,6 +225,7 @@ where
             self.run_oper_net(
                 &crypto,
                 &net_stack,
+                0, // TODO
                 core::future::pending(),
                 Some((&self.network.btp, &self.network.btp))
             )
@@ -259,7 +261,7 @@ where
         );
 
         let mut net_task =
-            pin!(self.run_transport_net(&crypto, &self.network.btp, &self.network.btp));
+            pin!(self.run_transport_net(&crypto, &self.network.btp, &self.network.btp, NoNetwork));
         let mut oper_net_act_task = pin!(async {
             NetCtlState::wait_prov_ready(&self.network.net_state, &self.network.btp).await;
 

@@ -229,7 +229,8 @@ where
                     self.root_handler(&(), &(), &net_ctl, &false, crypto.weak_rand()?, &handler);
                 let dm = self.dm(&crypto, (&handler, root_handler));
 
-                self.matter().close_comm_window(&crypto, &dm)?;
+                self.matter()
+                    .close_comm_window(&crypto, dm.change_notify())?;
             }
 
             Thread::run(
@@ -523,12 +524,18 @@ where
         let mut net_task = pin!(stack.run_oper_net(
             &self.crypto,
             &net_stack,
+            0, // TODO
             core::future::pending(),
             Option::<(NoNetwork, NoNetwork)>::None
         ));
 
-        let mut mdns_task =
-            pin!(stack.run_oper_netif_mdns(&self.crypto, &dm, &net_stack, &netif, &mut mdns));
+        let mut mdns_task = pin!(stack.run_oper_netif_mdns(
+            &self.crypto,
+            dm.change_notify(),
+            &net_stack,
+            &netif,
+            &mut mdns
+        ));
 
         let mut mgr_task = pin!(mgr.run());
 
@@ -591,7 +598,7 @@ where
             bump,
             stack.run_net_coex(
                 &self.crypto,
-                &dm,
+                dm.change_notify(),
                 &net_stack,
                 &netif,
                 &net_ctl,

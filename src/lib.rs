@@ -38,12 +38,14 @@ use rs_matter::error::{Error, ErrorCode};
 use rs_matter::pairing::qr::QrTextType;
 use rs_matter::respond::{DefaultResponder, ExchangeHandler, Responder};
 use rs_matter::sc::pase::MAX_COMM_WINDOW_TIMEOUT_SECS;
-use rs_matter::transport::network::{Address, ChainedNetwork, NetworkReceive, NetworkSend};
+use rs_matter::transport::network::{
+    Address, ChainedNetwork, NetworkMulticast, NetworkReceive, NetworkSend, NoNetwork,
+};
 use rs_matter::utils::epoch::Epoch;
 use rs_matter::utils::init::{init, Init};
 use rs_matter::utils::select::Coalesce;
 use rs_matter::utils::storage::pooled::PooledBuffers;
-use rs_matter::utils::sync::IfMutex;
+use rs_matter::utils::sync::{DynBase, IfMutex};
 use rs_matter::{BasicCommData, Matter, MATTER_PORT};
 
 use crate::bump::Bump;
@@ -437,6 +439,8 @@ where
         // The data model is not created yet, so we don't have to notify anything
         struct DummyNotify;
 
+        impl DynBase for DummyNotify {}
+
         impl ChangeNotify for DummyNotify {
             fn notify(&self, _endpoint_id: EndptId, _cluster_id: ClusterId, _attr_id: AttrId) {}
         }
@@ -560,6 +564,7 @@ where
         &self,
         crypto: C,
         net_stack: U,
+        _net_interface: u32,
         until: X,
         mut comm: Option<(R, S)>,
     ) -> Result<(), Error>
@@ -589,6 +594,8 @@ where
 
         let (recv, send) = socket.split();
 
+        let send = IfMutex::new(send);
+
         let mut until_task = pin!(until);
 
         if let Some((comm_recv, comm_send)) = comm.as_mut() {
@@ -596,16 +603,23 @@ where
 
             let mut netw_task = pin!(self.run_transport_net(
                 &crypto,
-                ChainedNetwork::new(Address::is_udp, udp::Udp(send), comm_send),
+                ChainedNetwork::new(Address::is_udp, udp::UdpSharedSend(&send), comm_send),
                 ChainedNetwork::new(Address::is_udp, udp::Udp(recv), comm_recv),
+                //TODO: Need to extend edge-nal's `UdpSplit` so support multicast
+                //ChainedNetwork::new(Address::is_udp, udp::UdpSharedMulticast(&send, net_interface), NoNetwork),
+                NoNetwork,
             ));
 
             select(&mut netw_task, &mut until_task).coalesce().await
         } else {
             info!("Running operational network");
 
-            let mut netw_task =
-                pin!(self.run_transport_net(&crypto, udp::Udp(send), udp::Udp(recv)));
+            let mut netw_task = pin!(self.run_transport_net(
+                &crypto,
+                udp::UdpSharedSend(&send),
+                udp::Udp(recv),
+                NoNetwork
+            ));
 
             select(&mut netw_task, &mut until_task).coalesce().await
         }
@@ -912,18 +926,20 @@ where
         select_slice(handlers).await.0
     }
 
-    fn run_transport_net<'t, C, S, R>(
+    fn run_transport_net<'t, C, S, R, M>(
         &'t self,
         crypto: C,
         send: S,
         recv: R,
+        multicast: M,
     ) -> impl Future<Output = Result<(), Error>> + 't
     where
         C: Crypto + 't,
         S: NetworkSend + 't,
         R: NetworkReceive + 't,
+        M: NetworkMulticast + 't,
     {
-        self.matter().run(crypto, send, recv)
+        self.matter().run(crypto, send, recv, multicast)
     }
 }
 

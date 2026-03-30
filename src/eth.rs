@@ -339,6 +339,7 @@ where
             self.stack.run_oper_net(
                 &self.crypto,
                 &net_stack,
+                0, // TODO
                 core::future::pending(),
                 Option::<(NoNetwork, NoNetwork)>::None,
             )
@@ -346,8 +347,13 @@ where
 
         let mut mdns_task = pin_alloc!(
             self.stack.bump,
-            self.stack
-                .run_oper_netif_mdns(&self.crypto, &dm, &net_stack, &netif, &mut mdns)
+            self.stack.run_oper_netif_mdns(
+                &self.crypto,
+                dm.change_notify(),
+                &net_stack,
+                &netif,
+                &mut mdns
+            )
         );
 
         let mut dm_task = pin_alloc!(self.stack.bump, self.stack.run_dm_with_bump(&dm));
