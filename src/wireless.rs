@@ -1,10 +1,11 @@
+use core::borrow::BorrowMut;
 use core::pin::pin;
 
 use embassy_futures::select::{select, select3};
 
 use rs_matter::crypto::Crypto;
 use rs_matter::dm::clusters::gen_diag::NetifDiag;
-use rs_matter::dm::clusters::net_comm::NetCtl;
+use rs_matter::dm::clusters::net_comm::{NetCtl, SharedNetworks};
 use rs_matter::dm::clusters::wifi_diag::WirelessDiag;
 use rs_matter::dm::networks::wireless::{
     NetCtlState, WirelessMgr, WirelessNetwork, WirelessNetworks, MAX_CREDS_SIZE,
@@ -13,6 +14,7 @@ use rs_matter::dm::networks::NetChangeNotif;
 use rs_matter::dm::ChangeNotify;
 use rs_matter::error::Error;
 use rs_matter::pairing::DiscoveryCapabilities;
+use rs_matter::persist::KvBlobStore;
 use rs_matter::transport::network::btp::{AdvData, Btp};
 use rs_matter::transport::network::NoNetwork;
 use rs_matter::utils::cell::RefCell;
@@ -24,9 +26,8 @@ use crate::ble::GattPeripheral;
 use crate::mdns::Mdns;
 use crate::nal::NetStack;
 use crate::network::{Embedding, Network};
-use crate::persist::MatterPersist;
 use crate::private::Sealed;
-use crate::{pin_alloc, MatterStack};
+use crate::{pin_alloc, DummyNotify, MatterStack};
 
 pub use gatt::*;
 pub use thread::*;
@@ -36,15 +37,10 @@ mod gatt;
 mod thread;
 mod wifi;
 
-const MAX_WIRELESS_NETWORKS: usize = 2;
+pub const MAX_WIRELESS_NETWORKS: usize = 2;
 
 /// A type alias for a Matter stack running over either Wifi or Thread (and BLE, during commissioning).
 pub type WirelessMatterStack<'a, const B: usize, T, E = ()> = MatterStack<'a, B, WirelessBle<T, E>>;
-
-/// A type alias for the Matter Persister created by calling `WirelessMatterStack::create_persist`.
-pub type WirelessMatterPersist<'a, S, T> = MatterPersist<'a, S, WirelessPersistContext<'a, T>>;
-
-type WirelessPersistContext<'a, T> = &'a WirelessNetworks<MAX_WIRELESS_NETWORKS, T>;
 
 /// An implementation of the `Network` trait for a Matter stack running over
 /// BLE during commissioning, and then over either WiFi or Thread when operating.
@@ -63,7 +59,7 @@ where
     T: WirelessNetwork,
 {
     btp: Btp,
-    networks: WirelessNetworks<MAX_WIRELESS_NETWORKS, T>,
+    networks: SharedNetworks<WirelessNetworks<MAX_WIRELESS_NETWORKS, T>>,
     net_state: blocking::Mutex<RefCell<NetCtlState>>,
     creds_buf: IfMutex<[u8; MAX_CREDS_SIZE]>,
     embedding: E,
@@ -78,7 +74,7 @@ where
     pub const fn new() -> Self {
         Self {
             btp: Btp::new(),
-            networks: WirelessNetworks::new(),
+            networks: SharedNetworks::new(WirelessNetworks::new()),
             net_state: NetCtlState::new_with_mutex(),
             creds_buf: IfMutex::new([0; MAX_CREDS_SIZE]),
             embedding: E::INIT,
@@ -89,7 +85,7 @@ where
     pub fn init() -> impl Init<Self> {
         init!(Self {
             btp <- Btp::init(),
-            networks <- WirelessNetworks::init(),
+            networks <- SharedNetworks::init(WirelessNetworks::init()),
             net_state <- NetCtlState::init_with_mutex(),
             creds_buf <- IfMutex::init(zeroed()),
             embedding <- E::init(),
@@ -97,7 +93,7 @@ where
     }
 
     /// Return a reference to the networks storage.
-    pub fn networks(&self) -> &WirelessNetworks<MAX_WIRELESS_NETWORKS, T> {
+    pub fn networks(&self) -> &SharedNetworks<WirelessNetworks<MAX_WIRELESS_NETWORKS, T>> {
         &self.networks
     }
 }
@@ -126,11 +122,6 @@ where
 {
     const INIT: Self = Self::new();
 
-    type PersistContext<'a>
-        = &'a WirelessNetworks<MAX_WIRELESS_NETWORKS, T>
-    where
-        Self: 'a;
-
     type Embedding<'a>
         = E
     where
@@ -144,10 +135,6 @@ where
         DiscoveryCapabilities::BLE
     }
 
-    fn persist_context(&self) -> Self::PersistContext<'_> {
-        &self.networks
-    }
-
     fn embedding(&self) -> &Self::Embedding<'_> {
         &self.embedding
     }
@@ -158,6 +145,62 @@ where
     T: WirelessNetwork,
     E: Embedding,
 {
+    /// Reset the Matter instance to the factory defaults by removing all fabrics and basic info settings
+    pub async fn reset<S>(&mut self, mut kv: S) -> Result<(), Error>
+    where
+        S: KvBlobStore,
+    {
+        let mut buf = unwrap!(self.store_buf.try_get());
+        let buf = buf.borrow_mut();
+
+        self.matter.reset_persist(&mut kv, buf).await?;
+
+        self.network
+            .networks
+            .get_mut()
+            .get_mut()
+            .reset_persist(kv, buf)
+            .await
+    }
+
+    /// Load the persisted state from the provided `KvBlobStore` implementation.
+    pub async fn load<S>(&mut self, mut kv: S) -> Result<(), Error>
+    where
+        S: KvBlobStore,
+    {
+        let mut buf = unwrap!(self.store_buf.try_get());
+        let buf = buf.borrow_mut();
+
+        self.matter.load_persist(&mut kv, buf).await?;
+
+        self.network
+            .networks
+            .get_mut()
+            .get_mut()
+            .load_persist(kv, buf)
+            .await
+    }
+
+    /// Run the startup sequence of the stack, which includes loading the persisted state
+    /// and opening the basic communication window if the device is not commissioned yet.
+    pub async fn startup<C, S>(&mut self, crypto: C, kv: S) -> Result<(), Error>
+    where
+        C: Crypto,
+        S: KvBlobStore,
+    {
+        self.load(kv).await?;
+
+        if !self.is_commissioned() {
+            info!("Device is not commissioned yet, opening commissioning window...");
+
+            self.open_basic_comm_window(crypto, &DummyNotify)?;
+        } else {
+            info!("Device is already commissioned");
+        }
+
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn run_net_coex<C, S, N, D, Q, G>(
         &self,
@@ -307,7 +350,7 @@ impl<S, N, C, M, G> PreexistingWireless<S, N, C, M, G> {
     }
 }
 
-pub(crate) struct MatterStackWirelessTask<'a, const B: usize, T, E, C, H, U>
+pub(crate) struct MatterStackWirelessTask<'a, const B: usize, T, E, C, H, S, U>
 where
     T: WirelessNetwork,
     E: Embedding,
@@ -315,5 +358,6 @@ where
     stack: &'a MatterStack<'a, B, WirelessBle<T, E>>,
     crypto: C,
     handler: H,
+    kv: S,
     user_task: U,
 }

@@ -6,34 +6,31 @@ use embassy_futures::select::{select, select3, select4};
 use rs_matter::crypto::{Crypto, RngCore};
 use rs_matter::dm::clusters::gen_comm::CommPolicy;
 use rs_matter::dm::clusters::gen_diag::GenDiag;
-use rs_matter::dm::clusters::net_comm::{NetCtl, NetCtlStatus, NetworkType};
+use rs_matter::dm::clusters::net_comm::{NetCtl, NetCtlStatus, NetworkType, SharedNetworks};
 use rs_matter::dm::clusters::thread_diag::ThreadDiag;
 use rs_matter::dm::endpoints::{self, with_sys, with_thread, SysHandler, ThreadHandler};
 use rs_matter::dm::networks::wireless::{
-    self, NetCtlWithStatusImpl, NoopWirelessNetCtl, WirelessMgr,
+    self, NetCtlWithStatusImpl, NoopWirelessNetCtl, ThreadNetworks, WirelessMgr,
 };
 use rs_matter::dm::networks::NetChangeNotif;
 use rs_matter::dm::{clusters::gen_diag::NetifDiag, AsyncHandler};
 use rs_matter::dm::{AsyncMetadata, Endpoint};
 use rs_matter::error::Error;
+use rs_matter::persist::KvBlobStoreAccess;
 use rs_matter::transport::network::NoNetwork;
 use rs_matter::utils::select::Coalesce;
 
 use crate::mdns::Mdns;
 use crate::nal::NetStack;
 use crate::network::Embedding;
-use crate::persist::KvBlobStore;
-use crate::wireless::{GattPeripheral, GattTask, MatterStackWirelessTask, WirelessMatterPersist};
+use crate::wireless::{GattPeripheral, GattTask, MatterStackWirelessTask};
 use crate::{pin_alloc, UserTask};
 
-use super::{Gatt, PreexistingWireless, WirelessMatterStack};
+use super::{Gatt, PreexistingWireless, WirelessMatterStack, MAX_WIRELESS_NETWORKS};
 
 /// A type alias for a Matter stack running over Thread (and BLE, during commissioning).
 pub type ThreadMatterStack<'a, const B: usize, E = ()> =
     WirelessMatterStack<'a, B, wireless::Thread, E>;
-
-/// A type alias for the Matter Persister created by calling `ThreadMatterStack::create_persist`.
-pub type ThreadMatterPersist<'a, S> = WirelessMatterPersist<'a, S, wireless::Thread>;
 
 impl<const B: usize, E> WirelessMatterStack<'_, B, wireless::Thread, E>
 where
@@ -47,21 +44,21 @@ where
     /// - `controller` - a user-provided `Controller` implementation
     /// - `mdns` - a user-provided `Mdns` implementation
     /// - `gatt` - a user-provided `GattPeripheral` implementation
-    /// - `persist` - a `ThreadMatterPersist` implementation instantiated on the stack with `create_persist`
     /// - `crypto` - a user-provided `Crypto` implementation
     /// - `handler` - a user-provided DM handler implementation
+    /// - `kv` - a user-provided `KvBlobStoreAccess` implementation
     /// - `user` - a user-provided future that will be polled only when the netif interface is up
     #[allow(clippy::too_many_arguments)]
-    pub fn run_preex<'t, U, N, Q, D, G, S, C, H, X>(
+    pub fn run_preex<'t, U, N, Q, D, G, C, H, S, X>(
         &'t self,
         net_stack: U,
         netif: N,
         net_ctl: Q,
         mdns: D,
         gatt: G,
-        persist: &'t ThreadMatterPersist<'_, S>,
         crypto: C,
         handler: H,
+        kv: S,
         user: X,
     ) -> impl Future<Output = Result<(), Error>> + 't
     where
@@ -70,16 +67,16 @@ where
         Q: NetCtl + ThreadDiag + NetChangeNotif + 't,
         D: Mdns + 't,
         G: GattPeripheral + 't,
-        S: KvBlobStore + 't,
         C: Crypto + 't,
         H: AsyncHandler + AsyncMetadata + 't,
+        S: KvBlobStoreAccess + 't,
         X: UserTask + 't,
     {
         self.run_coex(
             PreexistingWireless::new(net_stack, netif, net_ctl, mdns, gatt),
-            persist,
             crypto,
             handler,
+            kv,
             user,
         )
     }
@@ -88,23 +85,23 @@ where
     ///
     /// # Arguments
     /// - `thread` - a user-provided `ThreadCoex` implementation
-    /// - `persist` - a `ThreadMatterPersist` implementation instantiated on the stack with `create_persist`
     /// - `crypto` - a user-provided `Crypto` implementation
     /// - `handler` - a user-provided DM handler implementation
+    /// - `kv` - a user-provided `KvBlobStoreAccess` implementation
     /// - `user` - a user-provided future that will be polled only when the netif interface is up
-    pub async fn run_coex<W, S, C, H, U>(
+    pub async fn run_coex<W, C, H, S, U>(
         &self,
         mut thread: W,
-        persist: &ThreadMatterPersist<'_, S>,
         crypto: C,
         handler: H,
+        kv: S,
         user: U,
     ) -> Result<(), Error>
     where
         W: ThreadCoex,
-        S: KvBlobStore,
         C: Crypto,
         H: AsyncHandler + AsyncMetadata,
+        S: KvBlobStoreAccess,
         U: UserTask,
     {
         let _lock = self.run_lock.lock().await;
@@ -119,34 +116,33 @@ where
 
         self.matter().reset_transport()?;
 
-        let mut net_task = pin_alloc!(
+        let net_task = pin_alloc!(
             self.bump,
-            self.run_thread_coex(&mut thread, crypto, handler, user)
+            self.run_thread_coex(&mut thread, crypto, handler, kv, user)
         );
-        let mut persist_task = pin_alloc!(self.bump, self.run_psm(persist));
 
-        select(&mut net_task, &mut persist_task).coalesce().await
+        net_task.await
     }
 
     /// Run the Matter stack for a wireless network where the BLE and the Thread stacks cannot co-exist.
     ///
     /// # Arguments
     /// - `thread` - a user-provided `Thread` + `Gatt` implementation
-    /// - `persist` - a `ThreadMatterPersist` implementation instantiated on the stack with `create_persist`
     /// - `crypto` - a user-provided `Crypto` implementation
     /// - `handler` - a user-provided DM handler implementation
+    /// - `kv` - a user-provided `KvBlobStoreAccess` implementation
     /// - `user` - a user-provided future that will be polled only when the netif interface is up
-    pub async fn run<W, S, C, H, U>(
+    pub async fn run<W, C, H, S, U>(
         &self,
         thread: W,
-        persist: &ThreadMatterPersist<'_, S>,
         crypto: C,
         handler: H,
+        kv: S,
         user: U,
     ) -> Result<(), Error>
     where
         W: Thread + Gatt,
-        S: KvBlobStore,
+        S: KvBlobStoreAccess,
         C: Crypto,
         H: AsyncHandler + AsyncMetadata,
         U: UserTask,
@@ -163,48 +159,55 @@ where
 
         self.matter().reset_transport()?;
 
-        let mut net_task = pin_alloc!(self.bump, self.run_thread(thread, crypto, handler, user));
-        let mut persist_task = pin_alloc!(self.bump, self.run_psm(persist));
+        let net_task = pin_alloc!(
+            self.bump,
+            self.run_thread(thread, crypto, handler, kv, user)
+        );
 
-        select(&mut net_task, &mut persist_task).coalesce().await
+        net_task.await
     }
 
-    fn run_thread_coex<'t, W, C, H, U>(
+    fn run_thread_coex<'t, W, C, H, S, U>(
         &'t self,
         thread: &'t mut W,
         crypto: C,
         handler: H,
+        kv: S,
         user: U,
     ) -> impl Future<Output = Result<(), Error>> + 't
     where
         W: ThreadCoex + 't,
         C: Crypto + 't,
         H: AsyncHandler + AsyncMetadata + 't,
+        S: KvBlobStoreAccess + 't,
         U: UserTask + 't,
     {
         thread.run(MatterStackWirelessTask {
             stack: self,
             crypto,
             handler,
+            kv,
             user_task: user,
         })
     }
 
-    async fn run_thread<W, C, H, U>(
+    async fn run_thread<W, C, H, S, U>(
         &self,
         mut thread: W,
         crypto: C,
         handler: H,
+        kv: S,
         mut user: U,
     ) -> Result<(), Error>
     where
         W: Thread + Gatt,
         C: Crypto,
         H: AsyncHandler + AsyncMetadata,
+        S: KvBlobStoreAccess,
         U: UserTask,
     {
         loop {
-            let commissioned = self.is_commissioned().await?;
+            let commissioned = self.is_commissioned();
 
             if !commissioned {
                 Gatt::run(
@@ -213,6 +216,7 @@ where
                         stack: self,
                         crypto: &crypto,
                         handler: &handler,
+                        kv: &kv,
                         user_task: &mut user,
                     },
                 )
@@ -227,10 +231,9 @@ where
 
                 let root_handler =
                     self.root_handler(&(), &(), &net_ctl, &false, crypto.weak_rand()?, &handler);
-                let dm = self.dm(&crypto, (&handler, root_handler));
+                let dm = self.dm(&crypto, (&handler, root_handler), &kv);
 
-                self.matter()
-                    .close_comm_window(&crypto, dm.change_notify())?;
+                self.matter().close_comm_window(dm.change_notify())?;
             }
 
             Thread::run(
@@ -239,6 +242,7 @@ where
                     stack: self,
                     crypto: &crypto,
                     handler: &handler,
+                    kv: &kv,
                     user_task: &mut user,
                 },
             )
@@ -262,15 +266,20 @@ where
         comm_policy: &'a dyn CommPolicy,
         rand: impl RngCore + Copy,
         handler: H,
-    ) -> ThreadHandler<'a, &'a N, SysHandler<'a, H>>
+    ) -> ThreadHandler<
+        'a,
+        &'a SharedNetworks<ThreadNetworks<MAX_WIRELESS_NETWORKS>>,
+        &'a N,
+        SysHandler<'a, H>,
+    >
     where
         N: NetCtl + NetCtlStatus + ThreadDiag,
     {
         with_thread(
             gen_diag,
             netif_diag,
-            net_ctl,
             &self.network.networks,
+            net_ctl,
             rand,
             with_sys(comm_policy, rand, handler),
         )
@@ -446,12 +455,13 @@ where
     }
 }
 
-impl<'a, const B: usize, E, C, H, X> GattTask
-    for MatterStackWirelessTask<'a, B, wireless::Thread, E, C, H, X>
+impl<'a, const B: usize, E, C, H, S, X> GattTask
+    for MatterStackWirelessTask<'a, B, wireless::Thread, E, C, H, S, X>
 where
     E: Embedding,
     C: Crypto,
     H: AsyncMetadata + AsyncHandler,
+    S: KvBlobStoreAccess,
 {
     async fn run<P>(&mut self, peripheral: P) -> Result<(), Error>
     where
@@ -470,7 +480,9 @@ where
             self.crypto.weak_rand()?,
             &self.handler,
         );
-        let dm = self.stack.dm(&self.crypto, (&self.handler, handler));
+        let dm = self
+            .stack
+            .dm(&self.crypto, (&self.handler, handler), &self.kv);
 
         let mut btp_task = pin!(self.stack.run_btp(&self.crypto, peripheral));
 
@@ -480,23 +492,24 @@ where
     }
 }
 
-impl<'a, const B: usize, E, C, H, X> ThreadTask
-    for MatterStackWirelessTask<'a, B, wireless::Thread, E, C, H, X>
+impl<'a, const B: usize, E, C, H, S, X> ThreadTask
+    for MatterStackWirelessTask<'a, B, wireless::Thread, E, C, H, S, X>
 where
     E: Embedding,
     C: Crypto,
     H: AsyncMetadata + AsyncHandler,
+    S: KvBlobStoreAccess,
     X: UserTask,
 {
-    async fn run<S, N, Q, D>(
+    async fn run<T, N, Q, D>(
         &mut self,
-        net_stack: S,
+        net_stack: T,
         netif: N,
         net_ctl: Q,
         mut mdns: D,
     ) -> Result<(), Error>
     where
-        S: NetStack,
+        T: NetStack,
         N: NetifDiag + NetChangeNotif,
         Q: NetCtl + ThreadDiag + NetChangeNotif,
         D: Mdns,
@@ -517,7 +530,9 @@ where
             self.crypto.weak_rand()?,
             &self.handler,
         );
-        let dm = self.stack.dm(&self.crypto, (&self.handler, handler));
+        let dm = self
+            .stack
+            .dm(&self.crypto, (&self.handler, handler), &self.kv);
 
         let stack = &mut self.stack;
 
@@ -554,24 +569,25 @@ where
     }
 }
 
-impl<'a, const B: usize, E, C, H, X> ThreadCoexTask
-    for MatterStackWirelessTask<'a, B, wireless::Thread, E, C, H, X>
+impl<'a, const B: usize, E, C, H, S, X> ThreadCoexTask
+    for MatterStackWirelessTask<'a, B, wireless::Thread, E, C, H, S, X>
 where
     E: Embedding,
     C: Crypto,
     H: AsyncMetadata + AsyncHandler,
+    S: KvBlobStoreAccess,
     X: UserTask,
 {
-    async fn run<S, N, Q, D, G>(
+    async fn run<T, N, Q, D, G>(
         &mut self,
-        net_stack: S,
+        net_stack: T,
         netif: N,
         net_ctl: Q,
         mut mdns: D,
         mut gatt: G,
     ) -> Result<(), Error>
     where
-        S: NetStack,
+        T: NetStack,
         N: NetifDiag + NetChangeNotif,
         Q: NetCtl + ThreadDiag + NetChangeNotif,
         D: Mdns,
@@ -589,7 +605,9 @@ where
             self.crypto.weak_rand()?,
             &self.handler,
         );
-        let dm = self.stack.dm(&self.crypto, (&self.handler, handler));
+        let dm = self
+            .stack
+            .dm(&self.crypto, (&self.handler, handler), &self.kv);
 
         let stack = &mut self.stack;
         let bump = &stack.bump;

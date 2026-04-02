@@ -21,8 +21,6 @@ use edge_nal::{UdpBind, UdpSplit};
 use embassy_futures::select::{select, select3, select_slice};
 use embassy_time::Duration;
 
-use persist::{KvBlobBuffer, KvBlobStore, MatterPersist, NetworkPersist};
-
 use rs_matter::crypto::Crypto;
 use rs_matter::dm::clusters::basic_info::BasicInfoConfig;
 use rs_matter::dm::clusters::dev_att::DeviceAttestation;
@@ -36,6 +34,7 @@ use rs_matter::dm::{
 };
 use rs_matter::error::{Error, ErrorCode};
 use rs_matter::pairing::qr::QrTextType;
+use rs_matter::persist::{KvBlobStore, KvBlobStoreAccess};
 use rs_matter::respond::{DefaultResponder, ExchangeHandler, Responder};
 use rs_matter::sc::pase::MAX_COMM_WINDOW_TIMEOUT_SECS;
 use rs_matter::transport::network::{
@@ -52,7 +51,7 @@ use crate::bump::Bump;
 use crate::mdns::Mdns;
 use crate::nal::NetStack;
 use crate::network::Network;
-use crate::persist::SharedKvBlobStore;
+use crate::persist::{MatterKvBlobStoreBuf, MatterKvBlobStoreBufInstance, MatterSharedKvBlobStore};
 
 #[cfg(feature = "std")]
 #[allow(unused_imports)]
@@ -224,13 +223,14 @@ cfg_if! {
 
 const MAX_BUSY_RESPONDERS: usize = 2;
 
-pub(crate) type MatterStackDataModel<'a, C, H> = DataModel<
+pub(crate) type MatterStackDataModel<'a, C, H, S> = DataModel<
     'a,
     MAX_SUBSCRIPTIONS,
     EVENTS_RINGBUF_SIZE,
     C,
     PooledBuffers<MAX_IM_BUFFERS, IMBuffer>,
     H,
+    S,
 >;
 
 /// The `MatterStack` struct is the main entry point for the Matter stack.
@@ -252,7 +252,7 @@ where
         feature = "events-ringbuf-size-2048"
     ))]
     events: Events<EVENTS_RINGBUF_SIZE>,
-    store_buf: PooledBuffers<1, KvBlobBuffer>,
+    store_buf: MatterKvBlobStoreBuf,
     bump: Bump<B>,
     run_lock: IfMutex<()>,
     #[allow(unused)]
@@ -303,7 +303,7 @@ where
                 feature = "events-ringbuf-size-2048"
             ))]
             events: Events::new(epoch),
-            store_buf: PooledBuffers::new(0),
+            store_buf: MatterKvBlobStoreBuf::new(),
             bump: Bump::new(),
             run_lock: IfMutex::new(()),
             network: N::INIT,
@@ -353,7 +353,7 @@ where
             buffers <- PooledBuffers::init(0),
             subscriptions <- Subscriptions::init(),
             events <- Events::init(epoch),
-            store_buf <- PooledBuffers::init(0),
+            store_buf <- MatterKvBlobStoreBuf::init(),
             bump <- Bump::init(),
             run_lock <- IfMutex::init(()),
             network <- N::init(),
@@ -378,7 +378,7 @@ where
             ),
             buffers <- PooledBuffers::init(0),
             subscriptions <- Subscriptions::init(),
-            store_buf <- PooledBuffers::init(0),
+            store_buf <- MatterKvBlobStoreBuf::init(),
             bump <- Bump::init(),
             run_lock <- IfMutex::init(()),
             network <- N::init(),
@@ -395,94 +395,34 @@ where
         self.matter.replace_dev_att(dev_att);
     }
 
-    /// Create a new `MatterPersist` instance for the Matter stack.
-    ///
-    /// # Arguments
-    /// - `store` - a reference to a `KvBlobStore` instance
-    pub fn create_persist<'t, S>(&'t self, store: S) -> MatterPersist<'t, S, N::PersistContext<'t>>
-    where
-        S: KvBlobStore + 't,
-    {
-        MatterPersist::new(
-            SharedKvBlobStore::new(store, &self.store_buf),
-            self.matter(),
-            self.network().persist_context(),
-        )
-    }
-
-    /// An "all in one" persistence initializer method.
-    ///
-    /// # Arguments
-    /// - `crypto` - a user-provided crypto implementation
-    /// - `store` - a reference to a `KvBlobStore` instance
-    ///
-    /// This method does the following:
-    /// - Create the Matter Persister for that stack;
-    /// - Load the stack from the just-created persister;
-    /// - Check if the state of the device designates a not-yet-commissioned device and if so:
-    ///   - Open the commissioning window for 15 minutes;
-    ///   - Print the device pairing code and QR text to the console
-    ///   - Print the device QR code to the console
-    ///
-    /// This method is useful primarily for development/demo purposes. In production scenarios,
-    /// it is likely that the user would require more fine-graned control over when to open
-    /// the commissioning window, with what timeout, whether to print the QR code, etc.
-    pub async fn create_persist_with_comm_window<'t, C, S>(
-        &'t self,
-        crypto: C,
-        store: S,
-    ) -> Result<MatterPersist<'t, S, N::PersistContext<'t>>, Error>
-    where
-        C: Crypto,
-        S: KvBlobStore + 't,
-    {
-        // The data model is not created yet, so we don't have to notify anything
-        struct DummyNotify;
-
-        impl DynBase for DummyNotify {}
-
-        impl ChangeNotify for DummyNotify {
-            fn notify(&self, _endpoint_id: EndptId, _cluster_id: ClusterId, _attr_id: AttrId) {}
-        }
-
-        let persist = self.create_persist(store);
-
-        persist.load().await?;
-
-        if !self.matter().is_commissioned() {
-            info!("Device is not commissioned yet, opening commissioning window...");
-
-            self.matter().open_basic_comm_window(
-                MAX_COMM_WINDOW_TIMEOUT_SECS,
-                crypto,
-                &DummyNotify,
-            )?;
-            self.matter()
-                .print_standard_qr_text(self.network.discovery_capabilities())?;
-            self.matter().print_standard_qr_code(
-                QrTextType::Unicode,
-                self.network.discovery_capabilities(),
-            )?;
-        } else {
-            info!("Device is already commissioned");
-        }
-
-        Ok(persist)
-    }
-
     /// Get a reference to the `Matter` instance.
     pub const fn matter(&self) -> &Matter<'a> {
         &self.matter
-    }
-
-    pub const fn store_buf(&self) -> &PooledBuffers<1, KvBlobBuffer> {
-        &self.store_buf
     }
 
     /// Get a reference to the `Network` instance.
     /// Useful when the user instantiates `MatterStack` with a custom network type.
     pub const fn network(&self) -> &N {
         &self.network
+    }
+
+    /// Create a new `MatterSharedKvBlobStore` instance, which is used to read and write blobs from the storage.
+    ///
+    /// The user needs to provide a `KvBlobStore` implementation, which is used to actually read and write the blobs from the storage.
+    pub fn create_shared_kv<S>(&self, kv: S) -> Result<MatterSharedKvBlobStore<'_, S>, Error>
+    where
+        S: KvBlobStore,
+    {
+        Ok(MatterSharedKvBlobStore::new(kv, self.kv_store_buf()?))
+    }
+
+    /// Get the buffer for the KV blob store, which is used to read and write blobs from the storage.
+    ///
+    /// Return an error if the buffer is currently locked by another operation, which means that the caller should wait and try again later.
+    pub fn kv_store_buf(&self) -> Result<MatterKvBlobStoreBufInstance<'_>, Error> {
+        self.store_buf
+            .try_get()
+            .ok_or(ErrorCode::InvalidState.into())
     }
 
     /// Notifies the Matter instance that there is a change in the state
@@ -545,8 +485,31 @@ where
     // }
 
     /// Return information whether the Matter instance is already commissioned.
-    pub async fn is_commissioned(&self) -> Result<bool, Error> {
-        Ok(self.matter().is_commissioned())
+    pub fn is_commissioned(&self) -> bool {
+        self.matter().is_commissioned()
+    }
+
+    /// Open the basic communication window, which allows commissioning tools to discover and commission the device.
+    ///
+    /// # Arguments
+    /// - `crypto` - a user-provided crypto implementation, necessary for the secure sessions establishment that happens in the basic communication window
+    /// - `notify` - a user-provided `ChangeNotify`; typically, `Data Model::change_notify`; used to notify the Matter instance about changes in the state of the clusters' attributes, so that it can notify commissioning tools about them
+    pub fn open_basic_comm_window<C>(
+        &self,
+        crypto: C,
+        notify: &dyn ChangeNotify,
+    ) -> Result<(), Error>
+    where
+        C: Crypto,
+    {
+        self.matter()
+            .open_basic_comm_window(MAX_COMM_WINDOW_TIMEOUT_SECS, crypto, notify)?;
+
+        self.matter()
+            .print_standard_qr_text(self.network.discovery_capabilities())?;
+
+        self.matter()
+            .print_standard_qr_code(QrTextType::Unicode, self.network.discovery_capabilities())
     }
 
     /// This method is a specialization of `run_transport_net` over the UDP transport (both IPv4 and IPv6).
@@ -777,10 +740,11 @@ where
     }
 
     #[inline(always)]
-    fn dm<C, H>(&self, crypto: C, handler: H) -> MatterStackDataModel<'_, C, H>
+    fn dm<C, H, S>(&self, crypto: C, handler: H, kv: S) -> MatterStackDataModel<'_, C, H, S>
     where
         C: Crypto,
         H: AsyncHandler + AsyncMetadata,
+        S: KvBlobStoreAccess,
     {
         #[cfg(any(
             feature = "events-ringbuf-size-64",
@@ -797,6 +761,7 @@ where
             &self.subscriptions,
             Some(&self.events),
             handler,
+            kv,
         );
 
         #[cfg(not(any(
@@ -814,15 +779,17 @@ where
             &self.subscriptions,
             None,
             handler,
+            kv,
         );
 
         dm
     }
 
-    async fn run_dm<C, H>(&self, dm: &MatterStackDataModel<'_, C, H>) -> Result<(), Error>
+    async fn run_dm<C, H, S>(&self, dm: &MatterStackDataModel<'_, C, H, S>) -> Result<(), Error>
     where
         C: Crypto,
         H: AsyncHandler + AsyncMetadata,
+        S: KvBlobStoreAccess,
     {
         // TODO
         // Reset the Matter transport buffers and all sessions first
@@ -834,10 +801,14 @@ where
         select(&mut responder, &mut dm_job).coalesce().await
     }
 
-    async fn run_dm_with_bump<C, H>(&self, dm: &MatterStackDataModel<'_, C, H>) -> Result<(), Error>
+    async fn run_dm_with_bump<C, H, S>(
+        &self,
+        dm: &MatterStackDataModel<'_, C, H, S>,
+    ) -> Result<(), Error>
     where
         C: Crypto,
         H: AsyncHandler + AsyncMetadata,
+        S: KvBlobStoreAccess,
     {
         // TODO
         // Reset the Matter transport buffers and all sessions first
@@ -849,21 +820,14 @@ where
         select(&mut responder, &mut dm_job).coalesce().await
     }
 
-    fn run_psm<'t, S, C>(
-        &'t self,
-        persist: &'t MatterPersist<'_, S, C>,
-    ) -> impl Future<Output = Result<(), Error>> + 't
-    where
-        S: KvBlobStore,
-        C: NetworkPersist,
-    {
-        persist.run()
-    }
-
-    async fn run_responder<C, H>(&self, dm: &MatterStackDataModel<'_, C, H>) -> Result<(), Error>
+    async fn run_responder<C, H, S>(
+        &self,
+        dm: &MatterStackDataModel<'_, C, H, S>,
+    ) -> Result<(), Error>
     where
         C: Crypto,
         H: AsyncHandler + AsyncMetadata,
+        S: KvBlobStoreAccess,
     {
         let responder = DefaultResponder::new(dm);
 
@@ -874,13 +838,14 @@ where
         Ok(())
     }
 
-    async fn run_responder_with_bump<C, H>(
+    async fn run_responder_with_bump<C, H, S>(
         &self,
-        dm: &MatterStackDataModel<'_, C, H>,
+        dm: &MatterStackDataModel<'_, C, H, S>,
     ) -> Result<(), Error>
     where
         C: Crypto,
         H: AsyncHandler + AsyncMetadata,
+        S: KvBlobStoreAccess,
     {
         let responder = DefaultResponder::new(dm);
 
@@ -979,4 +944,13 @@ impl UserTask for () {
     {
         core::future::pending::<Result<(), Error>>()
     }
+}
+
+// The data model is not created yet, so we don't have to notify anything
+pub(crate) struct DummyNotify;
+
+impl DynBase for DummyNotify {}
+
+impl ChangeNotify for DummyNotify {
+    fn notify(&self, _endpoint_id: EndptId, _cluster_id: ClusterId, _attr_id: AttrId) {}
 }
