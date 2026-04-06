@@ -1,6 +1,7 @@
+use core::borrow::BorrowMut;
 use core::future::Future;
 
-use embassy_futures::select::{select, select4};
+use embassy_futures::select::select4;
 
 use rs_matter::crypto::{Crypto, RngCore};
 use rs_matter::dm::clusters::gen_comm::CommPolicy;
@@ -11,6 +12,7 @@ use rs_matter::dm::networks::NetChangeNotif;
 use rs_matter::dm::{AsyncHandler, AsyncMetadata, Endpoint};
 use rs_matter::error::Error;
 use rs_matter::pairing::DiscoveryCapabilities;
+use rs_matter::persist::{KvBlobStore, KvBlobStoreAccess};
 use rs_matter::transport::network::NoNetwork;
 use rs_matter::utils::init::{init, Init};
 use rs_matter::utils::select::Coalesce;
@@ -18,9 +20,8 @@ use rs_matter::utils::select::Coalesce;
 use crate::mdns::Mdns;
 use crate::nal::NetStack;
 use crate::network::{Embedding, Network};
-use crate::persist::{KvBlobStore, MatterPersist};
 use crate::private::Sealed;
-use crate::{pin_alloc, MatterStack, UserTask};
+use crate::{pin_alloc, DummyNotify, MatterStack, UserTask};
 
 /// An implementation of the `Network` trait for Ethernet.
 ///
@@ -44,11 +45,6 @@ where
 {
     const INIT: Self = Self { embedding: E::INIT };
 
-    type PersistContext<'a>
-        = ()
-    where
-        E: 'a;
-
     type Embedding<'a>
         = E
     where
@@ -64,8 +60,6 @@ where
         DiscoveryCapabilities::IP
     }
 
-    fn persist_context(&self) -> Self::PersistContext<'_> {}
-
     fn embedding(&self) -> &Self::Embedding<'_> {
         &self.embedding
     }
@@ -73,9 +67,6 @@ where
 
 // A type alias for a Matter stack running over Ethernet.
 pub type EthMatterStack<'a, const B: usize, E = ()> = MatterStack<'a, B, Eth<E>>;
-
-/// A type alias for the Matter Persister created by calling `EthMatterStack::create_persist`.
-pub type EthMatterPersist<'a, S> = MatterPersist<'a, S, ()>;
 
 /// A trait representing a task that needs access to the operational Ethernet interface
 /// (Network stack and Netif) to perform its work.
@@ -185,10 +176,44 @@ where
         )
     }
 
-    /// Reset the Matter instance to the factory defaults putting it into a
-    /// Commissionable mode.
-    pub fn reset(&self) -> Result<(), Error> {
-        // TODO: Reset fabrics and ACLs
+    /// Reset the Matter instance to the factory defaults by removing all fabrics and basic info settings
+    pub async fn reset<S>(&mut self, kv: S) -> Result<(), Error>
+    where
+        S: KvBlobStore,
+    {
+        let mut buf = unwrap!(self.store_buf.try_get());
+        let buf = buf.borrow_mut();
+
+        self.matter.reset_persist(kv, buf).await
+    }
+
+    /// Load the persisted state from the provided `KvBlobStore` implementation.
+    pub async fn load<S>(&mut self, kv: S) -> Result<(), Error>
+    where
+        S: KvBlobStore,
+    {
+        let mut buf = unwrap!(self.store_buf.try_get());
+        let buf = buf.borrow_mut();
+
+        self.matter.load_persist(kv, buf).await
+    }
+
+    /// Run the startup sequence of the stack, which includes loading the persisted state
+    /// and opening the basic communication window if the device is not commissioned yet.
+    pub async fn startup<C, S>(&mut self, crypto: C, kv: S) -> Result<(), Error>
+    where
+        C: Crypto,
+        S: KvBlobStore,
+    {
+        self.load(kv).await?;
+
+        if !self.is_commissioned() {
+            info!("Device is not commissioned yet, opening commissioning window...");
+
+            self.open_basic_comm_window(crypto, &DummyNotify)?;
+        } else {
+            info!("Device is already commissioned");
+        }
 
         Ok(())
     }
@@ -199,35 +224,35 @@ where
     /// - `net_stack` - a user-provided network stack implementation
     /// - `netif` - a user-provided `Netif` implementation for the Ethernet network
     /// - `mdns` - a user-provided mDNS implementation
-    /// - `persist` - an `EthMatterPersist` implementation instantiated on the stack with `create_persist`
     /// - `crypto` - a user-provided crypto implementation
     /// - `handler` - a user-provided DM handler implementation
+    /// - `kv` - a user-provided `KvBlobStoreAccess` implementation for loading the persisted state of the stack
     /// - `user` - a user-provided future that will be polled only when the netif interface is up
     #[allow(clippy::too_many_arguments)]
-    pub fn run_preex<'t, U, N, M, S, C, H, X>(
+    pub fn run_preex<'t, U, N, M, C, H, S, X>(
         &'t self,
         net_stack: U,
         netif: N,
         mdns: M,
-        persist: &'t EthMatterPersist<'_, S>,
         crypto: C,
         handler: H,
+        kv: S,
         user: X,
     ) -> impl Future<Output = Result<(), Error>> + 't
     where
         U: NetStack + 't,
         N: NetifDiag + NetChangeNotif + 't,
         M: Mdns + 't,
-        S: KvBlobStore + 't,
         C: Crypto + 't,
         H: AsyncHandler + AsyncMetadata + 't,
+        S: KvBlobStoreAccess + 't,
         X: UserTask + 't,
     {
         self.run(
             PreexistingEthernet::new(net_stack, netif, mdns),
-            persist,
             crypto,
             handler,
+            kv,
             user,
         )
     }
@@ -236,23 +261,23 @@ where
     ///
     /// # Arguments
     /// - `ethernet` - a user-provided `Ethernet` implementation
-    /// - `persist` - an `EthMatterPersist` implementation instantiated on the stack with `create_persist`
     /// - `crypto` - a user-provided crypto implementation
     /// - `handler` - a user-provided DM handler implementation
+    /// - `kv` - a user-provided `KvBlobStoreAccess` implementation for loading the persisted state of the stack
     /// - `user` - a user-provided future that will be polled only when the netif interface is up
     pub async fn run<N, S, C, H, X>(
         &self,
         mut ethernet: N,
-        persist: &EthMatterPersist<'_, S>,
         crypto: C,
         handler: H,
+        kv: S,
         user: X,
     ) -> Result<(), Error>
     where
         N: Ethernet,
-        S: KvBlobStore,
         C: Crypto,
         H: AsyncHandler + AsyncMetadata,
+        S: KvBlobStoreAccess,
         X: UserTask,
     {
         let _lock = self.run_lock.lock().await;
@@ -267,26 +292,27 @@ where
 
         self.matter().reset_transport()?;
 
-        let mut net_task = pin_alloc!(
+        let net_task = pin_alloc!(
             self.bump,
-            self.run_ethernet(&mut ethernet, crypto, handler, user)
+            self.run_ethernet(&mut ethernet, crypto, handler, kv, user)
         );
-        let mut persist_task = pin_alloc!(self.bump, self.run_psm(persist));
 
-        select(&mut net_task, &mut persist_task).coalesce().await
+        net_task.await
     }
 
-    fn run_ethernet<'t, N, C, H, X>(
+    fn run_ethernet<'t, N, C, H, S, X>(
         &'t self,
         ethernet: &'t mut N,
         crypto: C,
         handler: H,
+        kv: S,
         user: X,
     ) -> impl Future<Output = Result<(), Error>> + 't
     where
         N: Ethernet + 't,
         C: Crypto + 't,
         H: AsyncHandler + AsyncMetadata + 't,
+        S: KvBlobStoreAccess + 't,
         X: UserTask + 't,
     {
         Ethernet::run(
@@ -295,35 +321,39 @@ where
                 stack: self,
                 crypto,
                 handler,
+                kv,
                 user_task: user,
             },
         )
     }
 }
 
-struct MatterStackEthernetTask<'a, const B: usize, E, C, H, X>
+struct MatterStackEthernetTask<'a, const B: usize, E, C, H, S, X>
 where
     E: Embedding,
     C: Crypto,
     H: AsyncMetadata + AsyncHandler,
+    S: KvBlobStoreAccess,
     X: UserTask,
 {
     stack: &'a MatterStack<'a, B, Eth<E>>,
     crypto: C,
     handler: H,
+    kv: S,
     user_task: X,
 }
 
-impl<const B: usize, E, C, H, X> EthernetTask for MatterStackEthernetTask<'_, B, E, C, H, X>
+impl<const B: usize, E, C, H, S, X> EthernetTask for MatterStackEthernetTask<'_, B, E, C, H, S, X>
 where
     E: Embedding,
     C: Crypto,
     H: AsyncMetadata + AsyncHandler,
+    S: KvBlobStoreAccess,
     X: UserTask,
 {
-    async fn run<S, I, M>(&mut self, net_stack: S, netif: I, mut mdns: M) -> Result<(), Error>
+    async fn run<N, I, M>(&mut self, net_stack: N, netif: I, mut mdns: M) -> Result<(), Error>
     where
-        S: NetStack,
+        N: NetStack,
         I: NetifDiag + NetChangeNotif,
         M: Mdns,
     {
@@ -332,7 +362,9 @@ where
         let handler =
             self.stack
                 .root_handler(&(), &true, &netif, self.crypto.weak_rand()?, &self.handler);
-        let dm = self.stack.dm(&self.crypto, (&self.handler, handler));
+        let dm = self
+            .stack
+            .dm(&self.crypto, (&self.handler, handler), &self.kv);
 
         let mut net_task = pin_alloc!(
             self.stack.bump,

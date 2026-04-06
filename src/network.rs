@@ -1,7 +1,6 @@
 use rs_matter::pairing::DiscoveryCapabilities;
 use rs_matter::utils::init::{init_from_closure, Init};
 
-use crate::persist::NetworkPersist;
 use crate::private::Sealed;
 
 /// User data that can be embedded in the stack network
@@ -26,11 +25,6 @@ impl Embedding for () {
 pub trait Network: Sealed {
     const INIT: Self;
 
-    /// The network peristence context to be used by the `Persist` trait.
-    type PersistContext<'a>: NetworkPersist
-    where
-        Self: 'a;
-
     /// Optional additional state embedded in the network state
     type Embedding<'a>: Embedding
     where
@@ -41,9 +35,6 @@ pub trait Network: Sealed {
 
     /// Return the discovery capabilities of this network when commissioning the device.
     fn discovery_capabilities(&self) -> DiscoveryCapabilities;
-
-    /// Return the persistence context for this network.
-    fn persist_context(&self) -> Self::PersistContext<'_>;
 
     /// Return a reference to the embedded user data.
     fn embedding(&self) -> &Self::Embedding<'_>;

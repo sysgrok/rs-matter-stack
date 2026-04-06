@@ -14,24 +14,24 @@ use core::pin::pin;
 
 use log::info;
 
-use rs_matter::crypto::{default_crypto, Crypto};
-use rs_matter::dm::clusters::on_off::test::TestOnOffDeviceLogic;
-use rs_matter::dm::clusters::on_off::OnOffHooks;
-use rs_matter::dm::devices::test::DAC_PRIVKEY;
 use rs_matter_stack::eth::EthMatterStack;
+use rs_matter_stack::matter::crypto::{default_crypto, Crypto};
 use rs_matter_stack::matter::dm::clusters::desc;
 use rs_matter_stack::matter::dm::clusters::desc::ClusterHandler as _;
 use rs_matter_stack::matter::dm::clusters::on_off;
+use rs_matter_stack::matter::dm::clusters::on_off::test::TestOnOffDeviceLogic;
+use rs_matter_stack::matter::dm::clusters::on_off::OnOffHooks;
+use rs_matter_stack::matter::dm::devices::test::DAC_PRIVKEY;
 use rs_matter_stack::matter::dm::devices::test::{TEST_DEV_ATT, TEST_DEV_COMM, TEST_DEV_DET};
 use rs_matter_stack::matter::dm::devices::DEV_TYPE_ON_OFF_LIGHT;
 use rs_matter_stack::matter::dm::networks::unix::UnixNetifs;
 use rs_matter_stack::matter::dm::{Async, Dataver, Endpoint, Node};
 use rs_matter_stack::matter::dm::{EmptyHandler, EpClMatcher};
 use rs_matter_stack::matter::error::Error;
+use rs_matter_stack::matter::persist::DirKvBlobStore;
 use rs_matter_stack::matter::utils::init::InitMaybeUninit;
 use rs_matter_stack::matter::{clusters, devices};
 use rs_matter_stack::mdns::ZeroconfMdns;
-use rs_matter_stack::persist::DirKvBlobStore;
 
 use static_cell::StaticCell;
 
@@ -94,10 +94,12 @@ fn main() -> Result<(), Error> {
             Async(desc::DescHandler::new(Dataver::new_rand(&mut rand)).adapt()),
         );
 
-    // Create the persister & load any previously saved state
-    let persist = futures_lite::future::block_on(
-        stack.create_persist_with_comm_window(&crypto, DirKvBlobStore::new_default()),
-    )?;
+    // Create the KV BLOB store and load any previously saved state of `rs-matter`
+    let mut kv = DirKvBlobStore::new_default();
+    futures_lite::future::block_on(stack.startup(&crypto, &mut kv))?;
+
+    // Wrap the KV BLOB store as a shared reference, so that it can be used both by `rs-matter` and the user
+    let kv = stack.create_shared_kv(kv)?;
 
     // Run the Matter stack with our handler
     // Using `pin!` is completely optional, but reduces the size of the final future
@@ -108,12 +110,12 @@ fn main() -> Result<(), Error> {
         UnixNetifs,
         // Will use the mDNS implementation based on the `zeroconf` crate
         ZeroconfMdns,
-        // Will persist in `<tmp-dir>/rs-matter`
-        &persist,
         // The crypto provider
         &crypto,
         // Our `AsyncHandler` + `AsyncMetadata` impl
         (NODE, handler),
+        // Will persist in `<tmp-dir>/rs-matter`
+        &kv,
         // No user task future to run
         (),
     ));

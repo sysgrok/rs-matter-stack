@@ -6,24 +6,24 @@ use embassy_futures::select::{select, select3, select4};
 use rs_matter::crypto::{Crypto, RngCore};
 use rs_matter::dm::clusters::gen_comm::CommPolicy;
 use rs_matter::dm::clusters::gen_diag::GenDiag;
-use rs_matter::dm::clusters::net_comm::{NetCtl, NetCtlStatus, NetworkType};
+use rs_matter::dm::clusters::net_comm::{NetCtl, NetCtlStatus, NetworkType, SharedNetworks};
 use rs_matter::dm::clusters::wifi_diag::WifiDiag;
 use rs_matter::dm::endpoints::{self, with_sys, with_wifi, SysHandler, WifiHandler};
 use rs_matter::dm::networks::wireless::{
-    self, NetCtlWithStatusImpl, NoopWirelessNetCtl, WirelessMgr,
+    self, NetCtlWithStatusImpl, NoopWirelessNetCtl, WifiNetworks, WirelessMgr,
 };
 use rs_matter::dm::networks::NetChangeNotif;
 use rs_matter::dm::{clusters::gen_diag::NetifDiag, AsyncHandler};
 use rs_matter::dm::{AsyncMetadata, Endpoint};
 use rs_matter::error::Error;
+use rs_matter::persist::KvBlobStoreAccess;
 use rs_matter::transport::network::NoNetwork;
 use rs_matter::utils::select::Coalesce;
 
 use crate::mdns::Mdns;
 use crate::nal::NetStack;
 use crate::network::Embedding;
-use crate::persist::KvBlobStore;
-use crate::wireless::{GattPeripheral, MatterStackWirelessTask, WirelessMatterPersist};
+use crate::wireless::{GattPeripheral, MatterStackWirelessTask, MAX_WIRELESS_NETWORKS};
 use crate::{pin_alloc, UserTask};
 
 use super::{Gatt, GattTask, PreexistingWireless, WirelessMatterStack};
@@ -31,9 +31,6 @@ use super::{Gatt, GattTask, PreexistingWireless, WirelessMatterStack};
 /// A type alias for a Matter stack running over Wifi (and BLE, during commissioning).
 pub type WifiMatterStack<'a, const B: usize, E = ()> =
     WirelessMatterStack<'a, B, wireless::Wifi, E>;
-
-/// A type alias for the Matter Persister created by calling `WifiMatterStack::create_persist`.
-pub type WifiMatterPersist<'a, S> = WirelessMatterPersist<'a, S, wireless::Wifi>;
 
 impl<const B: usize, E> WirelessMatterStack<'_, B, wireless::Wifi, E>
 where
@@ -47,21 +44,21 @@ where
     /// - `controller` - a user-provided `Controller` implementation
     /// - `mdns` - a user-provided `Mdns` implementation
     /// - `gatt` - a user-provided `GattPeripheral` implementation
-    /// - `persist` - a `WifiMatterPersist` implementation instantiated on the stack with `create_persist`
     /// - `crypto` - a user-provided `Crypto` implementation
     /// - `handler` - a user-provided DM handler implementation
+    /// - `kv` - a user-provided `KvBlobStoreAccess` implementation
     /// - `user` - a user-provided future that will be polled only when the netif interface is up
     #[allow(clippy::too_many_arguments)]
-    pub async fn run_preex<'t, U, N, Q, D, G, S, C, H, X>(
+    pub async fn run_preex<'t, U, N, Q, D, G, C, H, S, X>(
         &'t self,
         net_stack: U,
         netif: N,
         net_ctl: Q,
         mdns: D,
         gatt: G,
-        persist: &'t WifiMatterPersist<'_, S>,
         crypto: C,
         handler: H,
+        kv: S,
         user: X,
     ) -> impl Future<Output = Result<(), Error>> + 't
     where
@@ -70,16 +67,16 @@ where
         Q: NetCtl + WifiDiag + NetChangeNotif + 't,
         D: Mdns + 't,
         G: GattPeripheral + 't,
-        S: KvBlobStore + 't,
         C: Crypto + 't,
         H: AsyncHandler + AsyncMetadata + 't,
+        S: KvBlobStoreAccess + 't,
         X: UserTask + 't,
     {
         self.run_coex(
             PreexistingWireless::new(net_stack, netif, net_ctl, mdns, gatt),
-            persist,
             crypto,
             handler,
+            kv,
             user,
         )
     }
@@ -88,23 +85,23 @@ where
     ///
     /// # Arguments
     /// - `wifi` - a user-provided `WifiCoex` implementation
-    /// - `persist` - a `WifiMatterPersist` implementation instantiated on the stack with `create_persist`
     /// - `crypto` - a user-provided `Crypto` implementation
     /// - `handler` - a user-provided DM handler implementation
+    /// - `kv` - a user-provided `KvBlobStoreAccess` implementation
     /// - `user` - a user-provided future that will be polled only when the netif interface is up
-    pub async fn run_coex<W, S, C, H, U>(
+    pub async fn run_coex<W, C, H, S, U>(
         &self,
         mut wifi: W,
-        persist: &WifiMatterPersist<'_, S>,
         crypto: C,
         handler: H,
+        kv: S,
         user: U,
     ) -> Result<(), Error>
     where
         W: WifiCoex,
-        S: KvBlobStore,
         C: Crypto,
         H: AsyncHandler + AsyncMetadata,
+        S: KvBlobStoreAccess,
         U: UserTask,
     {
         let _lock = self.run_lock.lock().await;
@@ -119,36 +116,35 @@ where
 
         self.matter().reset_transport()?;
 
-        let mut net_task = pin_alloc!(
+        let net_task = pin_alloc!(
             self.bump,
-            self.run_wifi_coex(&mut wifi, crypto, handler, user)
+            self.run_wifi_coex(&mut wifi, crypto, handler, kv, user)
         );
-        let mut persist_task = pin_alloc!(self.bump, self.run_psm(persist));
 
-        select(&mut net_task, &mut persist_task).coalesce().await
+        net_task.await
     }
 
     /// Run the Matter stack for a wireless network where the BLE and the Wifi stacks cannot co-exist.
     ///
     /// # Arguments
     /// - `wifi` - a user-provided `Wifi` + `Gatt` implementation
-    /// - `persist` - a `WifiMatterPersist` implementation instantiated on the stack with `create_persist`
     /// - `crypto` - a user-provided `Crypto` implementation
     /// - `handler` - a user-provided DM handler implementation
+    /// - `kv` - a user-provided `KvBlobStoreAccess` implementation
     /// - `user` - a user-provided future that will be polled only when the netif interface is up
-    pub async fn run<W, S, C, H, U>(
+    pub async fn run<W, C, H, S, U>(
         &self,
         wifi: W,
-        persist: &WifiMatterPersist<'_, S>,
         crypto: C,
         handler: H,
+        kv: S,
         user: U,
     ) -> Result<(), Error>
     where
         W: Wifi + Gatt,
-        S: KvBlobStore,
         C: Crypto,
         H: AsyncHandler + AsyncMetadata,
+        S: KvBlobStoreAccess,
         U: UserTask,
     {
         let _lock = self.run_lock.lock().await;
@@ -163,48 +159,52 @@ where
 
         self.matter().reset_transport()?;
 
-        let mut net_task = pin_alloc!(self.bump, self.run_wifi(wifi, crypto, handler, user));
-        let mut persist_task = pin_alloc!(self.bump, self.run_psm(persist));
+        let net_task = pin_alloc!(self.bump, self.run_wifi(wifi, crypto, handler, kv, user));
 
-        select(&mut net_task, &mut persist_task).coalesce().await
+        net_task.await
     }
 
-    fn run_wifi_coex<'t, W, C, H, U>(
+    fn run_wifi_coex<'t, W, C, H, S, U>(
         &'t self,
         wifi: &'t mut W,
         crypto: C,
         handler: H,
+        kv: S,
         user: U,
     ) -> impl Future<Output = Result<(), Error>> + 't
     where
         W: WifiCoex + 't,
         C: Crypto + 't,
         H: AsyncHandler + AsyncMetadata + 't,
+        S: KvBlobStoreAccess + 't,
         U: UserTask + 't,
     {
         wifi.run(MatterStackWirelessTask {
             stack: self,
             crypto,
             handler,
+            kv,
             user_task: user,
         })
     }
 
-    async fn run_wifi<W, C, H, U>(
+    async fn run_wifi<W, C, H, S, U>(
         &self,
         mut wifi: W,
         crypto: C,
         handler: H,
+        kv: S,
         mut user: U,
     ) -> Result<(), Error>
     where
         W: Wifi + Gatt,
         C: Crypto,
         H: AsyncHandler + AsyncMetadata,
+        S: KvBlobStoreAccess,
         U: UserTask,
     {
         loop {
-            let commissioned = self.is_commissioned().await?;
+            let commissioned = self.is_commissioned();
 
             if !commissioned {
                 Gatt::run(
@@ -213,6 +213,7 @@ where
                         stack: self,
                         crypto: &crypto,
                         handler: &handler,
+                        kv: &kv,
                         user_task: &mut user,
                     },
                 )
@@ -227,10 +228,9 @@ where
 
                 let root_handler =
                     self.root_handler(&(), &(), &net_ctl, &false, crypto.weak_rand()?, &handler);
-                let dm = self.dm(&crypto, (&handler, root_handler));
+                let dm = self.dm(&crypto, (&handler, root_handler), &kv);
 
-                self.matter()
-                    .close_comm_window(&crypto, dm.change_notify())?;
+                self.matter().close_comm_window(dm.change_notify())?;
             }
 
             Wifi::run(
@@ -239,6 +239,7 @@ where
                     stack: self,
                     crypto: &crypto,
                     handler: &handler,
+                    kv: &kv,
                     user_task: &mut user,
                 },
             )
@@ -262,15 +263,20 @@ where
         comm_policy: &'a dyn CommPolicy,
         rand: impl RngCore + Copy,
         handler: H,
-    ) -> WifiHandler<'a, &'a C, SysHandler<'a, H>>
+    ) -> WifiHandler<
+        'a,
+        &'a SharedNetworks<WifiNetworks<MAX_WIRELESS_NETWORKS>>,
+        &'a C,
+        SysHandler<'a, H>,
+    >
     where
         C: NetCtl + NetCtlStatus + WifiDiag,
     {
         with_wifi(
             gen_diag,
             netif_diag,
-            net_ctl,
             &self.network.networks,
+            net_ctl,
             rand,
             with_sys(comm_policy, rand, handler),
         )
@@ -446,12 +452,13 @@ where
     }
 }
 
-impl<'a, const B: usize, E, C, H, U> GattTask
-    for MatterStackWirelessTask<'a, B, wireless::Wifi, E, C, H, U>
+impl<'a, const B: usize, E, C, H, S, U> GattTask
+    for MatterStackWirelessTask<'a, B, wireless::Wifi, E, C, H, S, U>
 where
     E: Embedding,
     C: Crypto,
     H: AsyncMetadata + AsyncHandler,
+    S: KvBlobStoreAccess,
 {
     async fn run<P>(&mut self, peripheral: P) -> Result<(), Error>
     where
@@ -470,7 +477,9 @@ where
             self.crypto.weak_rand()?,
             &self.handler,
         );
-        let dm = self.stack.dm(&self.crypto, (&self.handler, handler));
+        let dm = self
+            .stack
+            .dm(&self.crypto, (&self.handler, handler), &self.kv);
 
         let mut btp_task = pin!(self.stack.run_btp(&self.crypto, peripheral));
 
@@ -480,23 +489,24 @@ where
     }
 }
 
-impl<'a, const B: usize, E, C, H, X> WifiTask
-    for MatterStackWirelessTask<'a, B, wireless::Wifi, E, C, H, X>
+impl<'a, const B: usize, E, C, H, S, X> WifiTask
+    for MatterStackWirelessTask<'a, B, wireless::Wifi, E, C, H, S, X>
 where
     E: Embedding,
     C: Crypto,
     H: AsyncMetadata + AsyncHandler,
+    S: KvBlobStoreAccess,
     X: UserTask,
 {
-    async fn run<S, N, Q, D>(
+    async fn run<T, N, Q, D>(
         &mut self,
-        net_stack: S,
+        net_stack: T,
         netif: N,
         net_ctl: Q,
         mut mdns: D,
     ) -> Result<(), Error>
     where
-        S: NetStack,
+        T: NetStack,
         N: NetifDiag + NetChangeNotif,
         Q: NetCtl + WifiDiag + NetChangeNotif,
         D: Mdns,
@@ -517,7 +527,9 @@ where
             self.crypto.weak_rand()?,
             &self.handler,
         );
-        let dm = self.stack.dm(&self.crypto, (&self.handler, handler));
+        let dm = self
+            .stack
+            .dm(&self.crypto, (&self.handler, handler), &self.kv);
 
         let stack = &mut self.stack;
 
@@ -554,24 +566,25 @@ where
     }
 }
 
-impl<'a, const B: usize, E, C, H, X> WifiCoexTask
-    for MatterStackWirelessTask<'a, B, wireless::Wifi, E, C, H, X>
+impl<'a, const B: usize, E, C, H, S, X> WifiCoexTask
+    for MatterStackWirelessTask<'a, B, wireless::Wifi, E, C, H, S, X>
 where
     E: Embedding,
     C: Crypto,
     H: AsyncMetadata + AsyncHandler,
+    S: KvBlobStoreAccess,
     X: UserTask,
 {
-    async fn run<S, N, Q, D, G>(
+    async fn run<T, N, Q, D, G>(
         &mut self,
-        net_stack: S,
+        net_stack: T,
         netif: N,
         net_ctl: Q,
         mut mdns: D,
         mut gatt: G,
     ) -> Result<(), Error>
     where
-        S: NetStack,
+        T: NetStack,
         N: NetifDiag + NetChangeNotif,
         Q: NetCtl + WifiDiag + NetChangeNotif,
         D: Mdns,
@@ -589,7 +602,9 @@ where
             self.crypto.weak_rand()?,
             &self.handler,
         );
-        let dm = self.stack.dm(&self.crypto, (&self.handler, handler));
+        let dm = self
+            .stack
+            .dm(&self.crypto, (&self.handler, handler), &self.kv);
 
         let stack = &mut self.stack;
         let bump = &stack.bump;
