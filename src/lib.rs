@@ -25,6 +25,7 @@ use rs_matter::crypto::Crypto;
 use rs_matter::dm::clusters::basic_info::BasicInfoConfig;
 use rs_matter::dm::clusters::dev_att::DeviceAttestation;
 use rs_matter::dm::clusters::gen_diag::NetifDiag;
+use rs_matter::dm::clusters::net_comm::NetworksAccess;
 #[allow(unused)]
 use rs_matter::dm::events::Events;
 use rs_matter::dm::networks::NetChangeNotif;
@@ -223,7 +224,7 @@ cfg_if! {
 
 const MAX_BUSY_RESPONDERS: usize = 2;
 
-pub(crate) type MatterStackDataModel<'a, C, H, S> = DataModel<
+pub(crate) type MatterStackDataModel<'a, C, H, S, N> = DataModel<
     'a,
     MAX_SUBSCRIPTIONS,
     EVENTS_RINGBUF_SIZE,
@@ -231,6 +232,7 @@ pub(crate) type MatterStackDataModel<'a, C, H, S> = DataModel<
     PooledBuffers<MAX_IM_BUFFERS, IMBuffer>,
     H,
     S,
+    N,
 >;
 
 /// The `MatterStack` struct is the main entry point for the Matter stack.
@@ -598,14 +600,12 @@ where
     ///
     /// # Arguments
     /// - `crypto` - a user-provided crypto implementation
-    /// - `notify` - a user-provided `ChangeNotify`; typically, the Data Model
     /// - `net_stack` - a user-provided network stack that implements `UdpBind`, `UdpConnect`, `TcpBind`, `TcpConnect`, and `Dns`
     /// - `netif` - a user-provided `Netif` implementation
     /// - `mdns` - a user-provided mDNS implementation
     async fn run_oper_netif_mdns<C, U, I, M>(
         &self,
         crypto: C,
-        notify: &dyn ChangeNotify,
         net_stack: U,
         netif: I,
         mut mdns: M,
@@ -713,7 +713,6 @@ where
                             .run(
                                 self.matter(),
                                 &crypto,
-                                notify,
                                 &udp_bind,
                                 &cur_state.mac,
                                 cur_state.ipv4,
@@ -740,11 +739,18 @@ where
     }
 
     #[inline(always)]
-    fn dm<C, H, S>(&self, crypto: C, handler: H, kv: S) -> MatterStackDataModel<'_, C, H, S>
+    fn dm<C, H, S, W>(
+        &self,
+        crypto: C,
+        handler: H,
+        kv: S,
+        networks: W,
+    ) -> MatterStackDataModel<'_, C, H, S, W>
     where
         C: Crypto,
         H: AsyncHandler + AsyncMetadata,
         S: KvBlobStoreAccess,
+        W: NetworksAccess,
     {
         #[cfg(any(
             feature = "events-ringbuf-size-64",
@@ -762,6 +768,7 @@ where
             Some(&self.events),
             handler,
             kv,
+            networks,
         );
 
         #[cfg(not(any(
@@ -780,16 +787,21 @@ where
             None,
             handler,
             kv,
+            networks,
         );
 
         dm
     }
 
-    async fn run_dm<C, H, S>(&self, dm: &MatterStackDataModel<'_, C, H, S>) -> Result<(), Error>
+    async fn run_dm<C, H, S, W>(
+        &self,
+        dm: &MatterStackDataModel<'_, C, H, S, W>,
+    ) -> Result<(), Error>
     where
         C: Crypto,
         H: AsyncHandler + AsyncMetadata,
         S: KvBlobStoreAccess,
+        W: NetworksAccess,
     {
         // TODO
         // Reset the Matter transport buffers and all sessions first
@@ -801,14 +813,15 @@ where
         select(&mut responder, &mut dm_job).coalesce().await
     }
 
-    async fn run_dm_with_bump<C, H, S>(
+    async fn run_dm_with_bump<C, H, S, W>(
         &self,
-        dm: &MatterStackDataModel<'_, C, H, S>,
+        dm: &MatterStackDataModel<'_, C, H, S, W>,
     ) -> Result<(), Error>
     where
         C: Crypto,
         H: AsyncHandler + AsyncMetadata,
         S: KvBlobStoreAccess,
+        W: NetworksAccess,
     {
         // TODO
         // Reset the Matter transport buffers and all sessions first
@@ -820,14 +833,15 @@ where
         select(&mut responder, &mut dm_job).coalesce().await
     }
 
-    async fn run_responder<C, H, S>(
+    async fn run_responder<C, H, S, W>(
         &self,
-        dm: &MatterStackDataModel<'_, C, H, S>,
+        dm: &MatterStackDataModel<'_, C, H, S, W>,
     ) -> Result<(), Error>
     where
         C: Crypto,
         H: AsyncHandler + AsyncMetadata,
         S: KvBlobStoreAccess,
+        W: NetworksAccess,
     {
         let responder = DefaultResponder::new(dm);
 
@@ -838,14 +852,15 @@ where
         Ok(())
     }
 
-    async fn run_responder_with_bump<C, H, S>(
+    async fn run_responder_with_bump<C, H, S, W>(
         &self,
-        dm: &MatterStackDataModel<'_, C, H, S>,
+        dm: &MatterStackDataModel<'_, C, H, S, W>,
     ) -> Result<(), Error>
     where
         C: Crypto,
         H: AsyncHandler + AsyncMetadata,
         S: KvBlobStoreAccess,
+        W: NetworksAccess,
     {
         let responder = DefaultResponder::new(dm);
 

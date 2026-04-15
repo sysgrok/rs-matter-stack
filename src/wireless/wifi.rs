@@ -6,24 +6,25 @@ use embassy_futures::select::{select, select3, select4};
 use rs_matter::crypto::{Crypto, RngCore};
 use rs_matter::dm::clusters::gen_comm::CommPolicy;
 use rs_matter::dm::clusters::gen_diag::GenDiag;
-use rs_matter::dm::clusters::net_comm::{NetCtl, NetCtlStatus, NetworkType, SharedNetworks};
+use rs_matter::dm::clusters::net_comm::{NetCtl, NetCtlStatus, NetworkType};
 use rs_matter::dm::clusters::wifi_diag::WifiDiag;
-use rs_matter::dm::endpoints::{self, with_sys, with_wifi, SysHandler, WifiHandler};
+use rs_matter::dm::endpoints::{with_wifi_sys, WifiSysHandler};
 use rs_matter::dm::networks::wireless::{
-    self, NetCtlWithStatusImpl, NoopWirelessNetCtl, WifiNetworks, WirelessMgr,
+    self, NetCtlWithStatusImpl, NoopWirelessNetCtl, WirelessMgr,
 };
 use rs_matter::dm::networks::NetChangeNotif;
 use rs_matter::dm::{clusters::gen_diag::NetifDiag, AsyncHandler};
 use rs_matter::dm::{AsyncMetadata, Endpoint};
 use rs_matter::error::Error;
 use rs_matter::persist::KvBlobStoreAccess;
+use rs_matter::root_endpoint;
 use rs_matter::transport::network::NoNetwork;
 use rs_matter::utils::select::Coalesce;
 
 use crate::mdns::Mdns;
 use crate::nal::NetStack;
 use crate::network::Embedding;
-use crate::wireless::{GattPeripheral, MatterStackWirelessTask, MAX_WIRELESS_NETWORKS};
+use crate::wireless::{GattPeripheral, MatterStackWirelessTask};
 use crate::{pin_alloc, UserTask};
 
 use super::{Gatt, GattTask, PreexistingWireless, WirelessMatterStack};
@@ -227,8 +228,13 @@ where
                 );
 
                 let root_handler =
-                    self.root_handler(&(), &(), &net_ctl, &false, crypto.weak_rand()?, &handler);
-                let dm = self.dm(&crypto, (&handler, root_handler), &kv);
+                    self.root_handler(&false, &(), &(), &net_ctl, crypto.weak_rand()?, &handler);
+                let dm = self.dm(
+                    &crypto,
+                    (&handler, root_handler),
+                    &kv,
+                    &self.network().networks,
+                );
 
                 self.matter().close_comm_window(dm.change_notify())?;
             }
@@ -250,35 +256,41 @@ where
     /// Return a metadata for the root (Endpoint 0) of the Matter Node
     /// configured for BLE+Wifi network.
     pub const fn root_endpoint() -> Endpoint<'static> {
-        endpoints::root_endpoint(NetworkType::Wifi)
+        const ENDPOINT: Endpoint<'static> = root_endpoint!(wifi);
+
+        ENDPOINT
+    }
+
+    /// Return a metadata for the root (Endpoint 0) of the Matter Node
+    /// configured for BLE+Wifi network and supporting Matter Groups.
+    pub const fn root_endpoint_g() -> Endpoint<'static> {
+        const ENDPOINT: Endpoint<'static> = root_endpoint!(gwifi);
+
+        ENDPOINT
     }
 
     /// Return a handler for the root (Endpoint 0) of the Matter Node
     /// configured for BLE+Wifi network.
     fn root_handler<'a, C, H>(
         &'a self,
+        comm_policy: &'a dyn CommPolicy,
         gen_diag: &'a dyn GenDiag,
         netif_diag: &'a dyn NetifDiag,
         net_ctl: &'a C,
-        comm_policy: &'a dyn CommPolicy,
         rand: impl RngCore + Copy,
         handler: H,
-    ) -> WifiHandler<
-        'a,
-        &'a SharedNetworks<WifiNetworks<MAX_WIRELESS_NETWORKS>>,
-        &'a C,
-        SysHandler<'a, H>,
-    >
+    ) -> WifiSysHandler<'a, &'a C, H>
     where
         C: NetCtl + NetCtlStatus + WifiDiag,
     {
-        with_wifi(
+        with_wifi_sys(
+            comm_policy,
             gen_diag,
             netif_diag,
-            &self.network.networks,
+            net_ctl,
             net_ctl,
             rand,
-            with_sys(comm_policy, rand, handler),
+            handler,
         )
     }
 }
@@ -470,16 +482,19 @@ where
         );
 
         let handler = self.stack.root_handler(
+            &false,
             &(),
             &(),
             &net_ctl,
-            &false,
             self.crypto.weak_rand()?,
             &self.handler,
         );
-        let dm = self
-            .stack
-            .dm(&self.crypto, (&self.handler, handler), &self.kv);
+        let dm = self.stack.dm(
+            &self.crypto,
+            (&self.handler, handler),
+            &self.kv,
+            &self.stack.network().networks,
+        );
 
         let mut btp_task = pin!(self.stack.run_btp(&self.crypto, peripheral));
 
@@ -520,16 +535,19 @@ where
         let net_ctl_s = NetCtlWithStatusImpl::new(&self.stack.network.net_state, &net_ctl);
 
         let handler = self.stack.root_handler(
+            &false,
             &(),
             &netif,
             &net_ctl_s,
-            &false,
             self.crypto.weak_rand()?,
             &self.handler,
         );
-        let dm = self
-            .stack
-            .dm(&self.crypto, (&self.handler, handler), &self.kv);
+        let dm = self.stack.dm(
+            &self.crypto,
+            (&self.handler, handler),
+            &self.kv,
+            &self.stack.network().networks,
+        );
 
         let stack = &mut self.stack;
 
@@ -541,13 +559,8 @@ where
             Option::<(NoNetwork, NoNetwork)>::None
         ));
 
-        let mut mdns_task = pin!(stack.run_oper_netif_mdns(
-            &self.crypto,
-            dm.change_notify(),
-            &net_stack,
-            &netif,
-            &mut mdns
-        ));
+        let mut mdns_task =
+            pin!(stack.run_oper_netif_mdns(&self.crypto, &net_stack, &netif, &mut mdns));
 
         let mut mgr_task = pin!(mgr.run());
 
@@ -595,16 +608,19 @@ where
         let net_ctl_s = NetCtlWithStatusImpl::new(&self.stack.network.net_state, &net_ctl);
 
         let handler = self.stack.root_handler(
+            &true,
             &(),
             &netif,
             &net_ctl_s,
-            &true,
             self.crypto.weak_rand()?,
             &self.handler,
         );
-        let dm = self
-            .stack
-            .dm(&self.crypto, (&self.handler, handler), &self.kv);
+        let dm = self.stack.dm(
+            &self.crypto,
+            (&self.handler, handler),
+            &self.kv,
+            &self.stack.network().networks,
+        );
 
         let stack = &mut self.stack;
         let bump = &stack.bump;
@@ -613,7 +629,6 @@ where
             bump,
             stack.run_net_coex(
                 &self.crypto,
-                dm.change_notify(),
                 &net_stack,
                 &netif,
                 &net_ctl,
