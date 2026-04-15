@@ -5,7 +5,6 @@ use core::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
 use edge_nal::{UdpBind, UdpSplit};
 
 use rs_matter::crypto::Crypto;
-use rs_matter::dm::ChangeNotify;
 use rs_matter::error::{Error, ErrorCode};
 use rs_matter::transport::network::mdns::builtin::BuiltinMdnsResponder;
 use rs_matter::Matter;
@@ -22,7 +21,6 @@ pub trait Mdns {
         &mut self,
         matter: &Matter<'_>,
         crypto: C,
-        notify: &dyn ChangeNotify,
         udp: U,
         mac: &[u8],
         ipv4: Ipv4Addr,
@@ -42,7 +40,6 @@ where
         &mut self,
         matter: &Matter<'_>,
         crypto: C,
-        notify: &dyn ChangeNotify,
         udp: U,
         mac: &[u8],
         ipv4: Ipv4Addr,
@@ -53,7 +50,7 @@ where
         C: Crypto,
         U: UdpBind,
     {
-        (*self).run(matter, crypto, notify, udp, mac, ipv4, ipv6, interface)
+        (*self).run(matter, crypto, udp, mac, ipv4, ipv6, interface)
     }
 }
 
@@ -66,7 +63,6 @@ impl BuiltinMdns {
     /// # Arguments
     /// - `matter`: A reference to the `Matter` instance.
     /// - `crypto`: An object implementing the `Crypto` trait for cryptographic operations.
-    /// - `notify`: A reference to an object implementing the `ChangeNotify` trait for notifying about changes in the device state.
     /// - `udp`: An object implementing the `UdpBind` trait for binding UDP sockets.
     /// - `mac`: The MAC address of the host, used to generate the hostname.
     /// - `ipv4`: The IPv4 address of the host.
@@ -77,7 +73,6 @@ impl BuiltinMdns {
         &mut self,
         matter: &Matter<'_>,
         crypto: C,
-        notify: &dyn ChangeNotify,
         udp: U,
         mac: &[u8],
         ipv4: Ipv4Addr,
@@ -148,7 +143,7 @@ impl BuiltinMdns {
             panic!("Invalid MAC address length: should be 6 or 8 bytes");
         }
 
-        BuiltinMdnsResponder::new(matter, crypto, notify)
+        BuiltinMdnsResponder::new(matter, crypto)
             .run(
                 udp::Udp(send),
                 udp::Udp(recv),
@@ -172,7 +167,6 @@ impl Mdns for BuiltinMdns {
         &mut self,
         matter: &Matter<'_>,
         crypto: C,
-        notify: &dyn ChangeNotify,
         udp: U,
         mac: &[u8],
         ipv4: Ipv4Addr,
@@ -183,9 +177,7 @@ impl Mdns for BuiltinMdns {
         C: Crypto,
         U: UdpBind,
     {
-        Self::run(
-            self, matter, crypto, notify, udp, mac, ipv4, ipv6, interface,
-        )
+        Self::run(self, matter, crypto, udp, mac, ipv4, ipv6, interface)
     }
 }
 
@@ -207,13 +199,9 @@ impl<'a> AvahiMdns<'a> {
         Self { connection }
     }
 
-    pub async fn run(
-        &mut self,
-        matter: &Matter<'_>,
-        notify: &dyn ChangeNotify,
-    ) -> Result<(), Error> {
+    pub async fn run(&mut self, matter: &Matter<'_>) -> Result<(), Error> {
         rs_matter::transport::network::mdns::avahi::AvahiMdnsResponder::new(matter)
-            .run(self.connection, |e, c, a| notify.notify(e, c, a))
+            .run(self.connection)
             .await
     }
 }
@@ -224,7 +212,6 @@ impl Mdns for AvahiMdns<'_> {
         &mut self,
         matter: &Matter<'_>,
         _crypto: C,
-        notify: &dyn ChangeNotify,
         _udp: U,
         _mac: &[u8],
         _ipv4: Ipv4Addr,
@@ -235,7 +222,7 @@ impl Mdns for AvahiMdns<'_> {
         C: Crypto,
         U: UdpBind,
     {
-        Self::run(self, matter, notify)
+        Self::run(self, matter)
     }
 }
 
@@ -252,13 +239,9 @@ impl<'a> ResolveMdns<'a> {
         Self { connection }
     }
 
-    pub async fn run(
-        &mut self,
-        matter: &Matter<'_>,
-        notify: &dyn ChangeNotify,
-    ) -> Result<(), Error> {
+    pub async fn run(&mut self, matter: &Matter<'_>) -> Result<(), Error> {
         rs_matter::transport::network::mdns::resolve::ResolveMdnsResponder::new(matter)
-            .run(self.connection, |e, c, a| notify.notify(e, c, a))
+            .run(self.connection)
             .await
     }
 }
@@ -269,7 +252,6 @@ impl Mdns for ResolveMdns<'_> {
         &mut self,
         matter: &Matter<'_>,
         _crypto: C,
-        notify: &dyn ChangeNotify,
         _udp: U,
         _mac: &[u8],
         _ipv4: Ipv4Addr,
@@ -280,7 +262,7 @@ impl Mdns for ResolveMdns<'_> {
         C: Crypto,
         U: UdpBind,
     {
-        Self::run(self, matter, notify)
+        Self::run(self, matter)
     }
 }
 
@@ -290,13 +272,9 @@ pub struct ZeroconfMdns;
 
 #[cfg(feature = "zeroconf")]
 impl ZeroconfMdns {
-    pub async fn run(
-        &mut self,
-        matter: &Matter<'_>,
-        notify: &dyn ChangeNotify,
-    ) -> Result<(), Error> {
+    pub async fn run(&mut self, matter: &Matter<'_>) -> Result<(), Error> {
         rs_matter::transport::network::mdns::zeroconf::ZeroconfMdnsResponder::new(matter)
-            .run(|e, c, a| notify.notify(e, c, a))
+            .run()
             .await
     }
 }
@@ -307,7 +285,6 @@ impl Mdns for ZeroconfMdns {
         &mut self,
         matter: &Matter<'_>,
         _crypto: C,
-        notify: &dyn ChangeNotify,
         _udp: U,
         _mac: &[u8],
         _ipv4: Ipv4Addr,
@@ -318,7 +295,7 @@ impl Mdns for ZeroconfMdns {
         C: Crypto,
         U: UdpBind,
     {
-        Self::run(self, matter, notify)
+        Self::run(self, matter)
     }
 }
 
@@ -328,13 +305,9 @@ pub struct AstroMdns;
 
 #[cfg(feature = "astro-dnssd")]
 impl AstroMdns {
-    pub async fn run(
-        &mut self,
-        matter: &Matter<'_>,
-        notify: &dyn ChangeNotify,
-    ) -> Result<(), Error> {
+    pub async fn run(&mut self, matter: &Matter<'_>) -> Result<(), Error> {
         rs_matter::transport::network::mdns::astro::AstroMdnsResponder::new(matter)
-            .run(|e, c, a| notify.notify(e, c, a))
+            .run()
             .await
     }
 }
@@ -345,7 +318,6 @@ impl Mdns for AstroMdns {
         &mut self,
         matter: &Matter<'_>,
         _crypto: C,
-        notify: &dyn ChangeNotify,
         _udp: U,
         _mac: &[u8],
         _ipv4: Ipv4Addr,
@@ -356,7 +328,7 @@ impl Mdns for AstroMdns {
         C: Crypto,
         U: UdpBind,
     {
-        Self::run(self, matter, notify).await
+        Self::run(self, matter).await
     }
 }
 

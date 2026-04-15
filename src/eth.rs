@@ -6,13 +6,14 @@ use embassy_futures::select::select4;
 use rs_matter::crypto::{Crypto, RngCore};
 use rs_matter::dm::clusters::gen_comm::CommPolicy;
 use rs_matter::dm::clusters::gen_diag::{GenDiag, NetifDiag};
-use rs_matter::dm::clusters::net_comm::NetworkType;
-use rs_matter::dm::endpoints::{self, with_eth, with_sys, EthHandler, SysHandler};
+use rs_matter::dm::clusters::net_comm::DummyNetworkAccess;
+use rs_matter::dm::endpoints::{with_eth_sys, EthSysHandler};
 use rs_matter::dm::networks::NetChangeNotif;
 use rs_matter::dm::{AsyncHandler, AsyncMetadata, Endpoint};
 use rs_matter::error::Error;
 use rs_matter::pairing::DiscoveryCapabilities;
 use rs_matter::persist::{KvBlobStore, KvBlobStoreAccess};
+use rs_matter::root_endpoint;
 use rs_matter::transport::network::NoNetwork;
 use rs_matter::utils::init::{init, Init};
 use rs_matter::utils::select::Coalesce;
@@ -155,25 +156,30 @@ where
     /// Return a metadata for the root (Endpoint 0) of the Matter Node
     /// configured for Ethernet network.
     pub const fn root_endpoint() -> Endpoint<'static> {
-        endpoints::root_endpoint(NetworkType::Ethernet)
+        const ENDPOINT: Endpoint<'static> = root_endpoint!(eth);
+
+        ENDPOINT
+    }
+
+    /// Return a metadata for the root (Endpoint 0) of the Matter Node
+    /// configured for Ethernet network and supporting Matter Groups.
+    pub const fn root_endpoint_g() -> Endpoint<'static> {
+        const ENDPOINT: Endpoint<'static> = root_endpoint!(geth);
+
+        ENDPOINT
     }
 
     /// Return a handler for the root (Endpoint 0) of the Matter Node
     /// configured for Ethernet network.
     fn root_handler<'a, H>(
         &self,
-        gen_diag: &'a dyn GenDiag,
         comm_policy: &'a dyn CommPolicy,
+        gen_diag: &'a dyn GenDiag,
         netif_diag: &'a dyn NetifDiag,
         rand: impl RngCore + Copy,
         handler: H,
-    ) -> EthHandler<'a, SysHandler<'a, H>> {
-        with_eth(
-            gen_diag,
-            netif_diag,
-            rand,
-            with_sys(comm_policy, rand, handler),
-        )
+    ) -> EthSysHandler<'a, H> {
+        with_eth_sys(comm_policy, gen_diag, netif_diag, rand, handler)
     }
 
     /// Reset the Matter instance to the factory defaults by removing all fabrics and basic info settings
@@ -361,10 +367,13 @@ where
 
         let handler =
             self.stack
-                .root_handler(&(), &true, &netif, self.crypto.weak_rand()?, &self.handler);
-        let dm = self
-            .stack
-            .dm(&self.crypto, (&self.handler, handler), &self.kv);
+                .root_handler(&false, &(), &netif, self.crypto.weak_rand()?, &self.handler);
+        let dm = self.stack.dm(
+            &self.crypto,
+            (&self.handler, handler),
+            &self.kv,
+            DummyNetworkAccess,
+        );
 
         let mut net_task = pin_alloc!(
             self.stack.bump,
@@ -379,13 +388,8 @@ where
 
         let mut mdns_task = pin_alloc!(
             self.stack.bump,
-            self.stack.run_oper_netif_mdns(
-                &self.crypto,
-                dm.change_notify(),
-                &net_stack,
-                &netif,
-                &mut mdns
-            )
+            self.stack
+                .run_oper_netif_mdns(&self.crypto, &net_stack, &netif, &mut mdns)
         );
 
         let mut dm_task = pin_alloc!(self.stack.bump, self.stack.run_dm_with_bump(&dm));

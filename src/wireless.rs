@@ -11,7 +11,6 @@ use rs_matter::dm::networks::wireless::{
     NetCtlState, WirelessMgr, WirelessNetwork, WirelessNetworks, MAX_CREDS_SIZE,
 };
 use rs_matter::dm::networks::NetChangeNotif;
-use rs_matter::dm::ChangeNotify;
 use rs_matter::error::Error;
 use rs_matter::pairing::DiscoveryCapabilities;
 use rs_matter::persist::KvBlobStore;
@@ -205,7 +204,6 @@ where
     async fn run_net_coex<C, S, N, D, Q, G>(
         &self,
         crypto: C,
-        notify: &dyn ChangeNotify,
         net_stack: S,
         netif: N,
         net_ctl: Q,
@@ -226,7 +224,7 @@ where
 
         let mut net_task = pin_alloc!(
             self.bump,
-            self.run_btp_coex(&crypto, notify, &net_stack, &netif, &mut mdns, &mut gatt)
+            self.run_btp_coex(&crypto, &net_stack, &netif, &mut mdns, &mut gatt)
         );
         let mut mgr_task = pin_alloc!(self.bump, mgr.run());
 
@@ -236,7 +234,6 @@ where
     async fn run_btp_coex<C, S, N, D, P>(
         &self,
         crypto: C,
-        notify: &dyn ChangeNotify,
         net_stack: S,
         netif: N,
         mut mdns: D,
@@ -276,7 +273,7 @@ where
 
         let mut mdns_task = pin_alloc!(
             self.bump,
-            self.run_oper_netif_mdns(&crypto, notify, &net_stack, &netif, &mut mdns)
+            self.run_oper_netif_mdns(&crypto, &net_stack, &netif, &mut mdns)
         );
 
         select3(&mut btp_task, &mut net_task, &mut mdns_task)
