@@ -31,7 +31,8 @@ use rs_matter::dm::events::Events;
 use rs_matter::dm::networks::NetChangeNotif;
 use rs_matter::dm::subscriptions::Subscriptions;
 use rs_matter::dm::{
-    AsyncHandler, AsyncMetadata, AttrId, ChangeNotify, ClusterId, DataModel, EndptId, IMBuffer,
+    AsyncHandler, AsyncMetadata, AttrChangeNotifier, AttrId, ClusterId, DataModel, EndptId,
+    IMBuffer,
 };
 use rs_matter::error::{Error, ErrorCode};
 use rs_matter::pairing::qr::QrTextType;
@@ -124,7 +125,10 @@ cfg_if! {
 }
 
 cfg_if! {
-    if #[cfg(feature = "events-ringbuf-size-64")] {
+    if #[cfg(feature = "events-ringbuf-size-0")] {
+        /// Events ringbuf size
+        const EVENTS_RINGBUF_SIZE: usize = 0;
+    } else if #[cfg(feature = "events-ringbuf-size-64")] {
         /// Events ringbuf size
         const EVENTS_RINGBUF_SIZE: usize = 64;
     } else if #[cfg(feature = "events-ringbuf-size-128")] {
@@ -245,14 +249,6 @@ where
     matter: Matter<'a>,
     buffers: PooledBuffers<MAX_IM_BUFFERS, IMBuffer>,
     subscriptions: Subscriptions<MAX_SUBSCRIPTIONS>,
-    #[cfg(any(
-        feature = "events-ringbuf-size-64",
-        feature = "events-ringbuf-size-128",
-        feature = "events-ringbuf-size-256",
-        feature = "events-ringbuf-size-512",
-        feature = "events-ringbuf-size-1024",
-        feature = "events-ringbuf-size-2048"
-    ))]
     events: Events<EVENTS_RINGBUF_SIZE>,
     store_buf: MatterKvBlobStoreBuf,
     bump: Bump<B>,
@@ -296,14 +292,6 @@ where
             matter: Matter::new(dev_det, dev_comm, dev_att, epoch, MATTER_PORT),
             buffers: PooledBuffers::new(0),
             subscriptions: Subscriptions::new(),
-            #[cfg(any(
-                feature = "events-ringbuf-size-64",
-                feature = "events-ringbuf-size-128",
-                feature = "events-ringbuf-size-256",
-                feature = "events-ringbuf-size-512",
-                feature = "events-ringbuf-size-1024",
-                feature = "events-ringbuf-size-2048"
-            ))]
             events: Events::new(epoch),
             store_buf: MatterKvBlobStoreBuf::new(),
             bump: Bump::new(),
@@ -336,15 +324,7 @@ where
         dev_att: &'a dyn DeviceAttestation,
         epoch: Epoch,
     ) -> impl Init<Self> {
-        #[cfg(any(
-            feature = "events-ringbuf-size-64",
-            feature = "events-ringbuf-size-128",
-            feature = "events-ringbuf-size-256",
-            feature = "events-ringbuf-size-512",
-            feature = "events-ringbuf-size-1024",
-            feature = "events-ringbuf-size-2048"
-        ))]
-        let init = init!(Self {
+        init!(Self {
             matter <- Matter::init(
                 dev_det,
                 dev_comm,
@@ -360,34 +340,7 @@ where
             run_lock <- IfMutex::init(()),
             network <- N::init(),
             //netif_conf: Signal::new(None),
-        });
-
-        #[cfg(not(any(
-            feature = "events-ringbuf-size-64",
-            feature = "events-ringbuf-size-128",
-            feature = "events-ringbuf-size-256",
-            feature = "events-ringbuf-size-512",
-            feature = "events-ringbuf-size-1024",
-            feature = "events-ringbuf-size-2048"
-        )))]
-        let init = init!(Self {
-            matter <- Matter::init(
-                dev_det,
-                dev_comm,
-                dev_att,
-                epoch,
-                MATTER_PORT,
-            ),
-            buffers <- PooledBuffers::init(0),
-            subscriptions <- Subscriptions::init(),
-            store_buf <- MatterKvBlobStoreBuf::init(),
-            bump <- Bump::init(),
-            run_lock <- IfMutex::init(()),
-            network <- N::init(),
-            //netif_conf: Signal::new(None),
-        });
-
-        init
+        })
     }
 
     /// A utility method to replace the initial Device Attestation Data Fetcher with another one.
@@ -495,11 +448,11 @@ where
     ///
     /// # Arguments
     /// - `crypto` - a user-provided crypto implementation, necessary for the secure sessions establishment that happens in the basic communication window
-    /// - `notify` - a user-provided `ChangeNotify`; typically, `Data Model::change_notify`; used to notify the Matter instance about changes in the state of the clusters' attributes, so that it can notify commissioning tools about them
+    /// - `notify` - a user-provided `AttrChangeNotifier`; typically, `Data Model::change_notify`; used to notify the Matter instance about changes in the state of the clusters' attributes, so that it can notify commissioning tools about them
     pub fn open_basic_comm_window<C>(
         &self,
         crypto: C,
-        notify: &dyn ChangeNotify,
+        notify: &dyn AttrChangeNotifier,
     ) -> Result<(), Error>
     where
         C: Crypto,
@@ -752,45 +705,16 @@ where
         S: KvBlobStoreAccess,
         W: NetworksAccess,
     {
-        #[cfg(any(
-            feature = "events-ringbuf-size-64",
-            feature = "events-ringbuf-size-128",
-            feature = "events-ringbuf-size-256",
-            feature = "events-ringbuf-size-512",
-            feature = "events-ringbuf-size-1024",
-            feature = "events-ringbuf-size-2048"
-        ))]
-        let dm = MatterStackDataModel::new(
+        MatterStackDataModel::new(
             self.matter(),
             crypto,
             &self.buffers,
             &self.subscriptions,
-            Some(&self.events),
+            &self.events,
             handler,
             kv,
             networks,
-        );
-
-        #[cfg(not(any(
-            feature = "events-ringbuf-size-64",
-            feature = "events-ringbuf-size-128",
-            feature = "events-ringbuf-size-256",
-            feature = "events-ringbuf-size-512",
-            feature = "events-ringbuf-size-1024",
-            feature = "events-ringbuf-size-2048"
-        )))]
-        let dm = MatterStackDataModel::new(
-            self.matter(),
-            crypto,
-            &self.buffers,
-            &self.subscriptions,
-            None,
-            handler,
-            kv,
-            networks,
-        );
-
-        dm
+        )
     }
 
     async fn run_dm<C, H, S, W>(
@@ -962,10 +886,11 @@ impl UserTask for () {
 }
 
 // The data model is not created yet, so we don't have to notify anything
-pub(crate) struct DummyNotify;
+pub(crate) struct DummyAttrNotifier;
 
-impl DynBase for DummyNotify {}
+impl DynBase for DummyAttrNotifier {}
 
-impl ChangeNotify for DummyNotify {
-    fn notify(&self, _endpoint_id: EndptId, _cluster_id: ClusterId, _attr_id: AttrId) {}
+impl AttrChangeNotifier for DummyAttrNotifier {
+    fn notify_attr_changed(&self, _endpoint_id: EndptId, _cluster_id: ClusterId, _attr_id: AttrId) {
+    }
 }

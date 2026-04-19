@@ -22,7 +22,7 @@ use crate::mdns::Mdns;
 use crate::nal::NetStack;
 use crate::network::{Embedding, Network};
 use crate::private::Sealed;
-use crate::{pin_alloc, DummyNotify, MatterStack, UserTask};
+use crate::{pin_alloc, DummyAttrNotifier, MatterStack, UserTask};
 
 /// An implementation of the `Network` trait for Ethernet.
 ///
@@ -216,7 +216,7 @@ where
         if !self.is_commissioned() {
             info!("Device is not commissioned yet, opening commissioning window...");
 
-            self.open_basic_comm_window(crypto, &DummyNotify)?;
+            self.open_basic_comm_window(crypto, &DummyAttrNotifier)?;
         } else {
             info!("Device is already commissioned");
         }

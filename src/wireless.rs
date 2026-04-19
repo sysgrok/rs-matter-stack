@@ -26,7 +26,7 @@ use crate::mdns::Mdns;
 use crate::nal::NetStack;
 use crate::network::{Embedding, Network};
 use crate::private::Sealed;
-use crate::{pin_alloc, DummyNotify, MatterStack};
+use crate::{pin_alloc, DummyAttrNotifier, MatterStack};
 
 pub use gatt::*;
 pub use thread::*;
@@ -192,7 +192,7 @@ where
         if !self.is_commissioned() {
             info!("Device is not commissioned yet, opening commissioning window...");
 
-            self.open_basic_comm_window(crypto, &DummyNotify)?;
+            self.open_basic_comm_window(crypto, &DummyAttrNotifier)?;
         } else {
             info!("Device is already commissioned");
         }
