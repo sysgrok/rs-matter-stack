@@ -380,29 +380,6 @@ where
             .ok_or(ErrorCode::InvalidState.into())
     }
 
-    /// Notifies the Matter instance that there is a change in the state
-    /// of one of the clusters' attributes.
-    ///
-    /// User is expected to call this method when a user-provided cluster attribute
-    /// changes its state.
-    ///
-    /// This is necessary so as the Matter instance can notify clients
-    /// that have active subscriptions to some of the changed clusters.
-    ///
-    /// # Arguments
-    /// - `endpoint_id` - the endpoint ID where the cluster is located
-    /// - `cluster_id` - the ID of the cluster that has changed
-    /// - `attr_id` - the ID of the attribute that has changed
-    pub fn notify_attribute_changed(
-        &self,
-        endpoint_id: EndptId,
-        cluster_id: ClusterId,
-        attr_id: AttrId,
-    ) {
-        self.subscriptions
-            .notify_attribute_changed(endpoint_id, cluster_id, attr_id);
-    }
-
     // /// User code hook to get the state of the netif passed to the
     // /// `run_with_netif` method.
     // ///
@@ -893,4 +870,10 @@ impl DynBase for DummyAttrNotifier {}
 impl AttrChangeNotifier for DummyAttrNotifier {
     fn notify_attr_changed(&self, _endpoint_id: EndptId, _cluster_id: ClusterId, _attr_id: AttrId) {
     }
+
+    fn notify_cluster_changed(&self, _endpoint_id: EndptId, _cluster_id: ClusterId) {}
+
+    fn notify_endpoint_changed(&self, _endpoint_id: EndptId) {}
+
+    fn notify_all_changed(&self) {}
 }
