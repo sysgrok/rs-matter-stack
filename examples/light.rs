@@ -14,11 +14,11 @@ use log::info;
 
 use rs_matter_stack::ble::BluerGattPeripheral;
 use rs_matter_stack::matter::crypto::{default_crypto, Crypto};
+use rs_matter_stack::matter::dm::clusters::app::on_off;
+use rs_matter_stack::matter::dm::clusters::app::on_off::test::TestOnOffDeviceLogic;
+use rs_matter_stack::matter::dm::clusters::app::on_off::OnOffHooks;
 use rs_matter_stack::matter::dm::clusters::desc::{ClusterHandler as _, DescHandler};
 use rs_matter_stack::matter::dm::clusters::net_comm::NetworkType;
-use rs_matter_stack::matter::dm::clusters::on_off;
-use rs_matter_stack::matter::dm::clusters::on_off::test::TestOnOffDeviceLogic;
-use rs_matter_stack::matter::dm::clusters::on_off::OnOffHooks;
 use rs_matter_stack::matter::dm::devices::test::DAC_PRIVKEY;
 use rs_matter_stack::matter::dm::devices::test::{TEST_DEV_ATT, TEST_DEV_COMM, TEST_DEV_DET};
 use rs_matter_stack::matter::dm::devices::DEV_TYPE_ON_OFF_LIGHT;
