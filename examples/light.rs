@@ -28,9 +28,9 @@ use rs_matter_stack::matter::dm::{Async, Dataver, Endpoint, Node};
 use rs_matter_stack::matter::dm::{EmptyHandler, EpClMatcher};
 use rs_matter_stack::matter::error::Error;
 use rs_matter_stack::matter::persist::DirKvBlobStore;
+use rs_matter_stack::matter::transport::network::mdns::zeroconf::ZeroconfMdnsResponder;
 use rs_matter_stack::matter::utils::init::InitMaybeUninit;
 use rs_matter_stack::matter::{clusters, devices};
-use rs_matter_stack::mdns::ZeroconfMdns;
 use rs_matter_stack::wireless::PreexistingWireless;
 use rs_matter_stack::wireless::WifiMatterStack;
 
@@ -114,7 +114,7 @@ fn main() -> Result<(), Error> {
             // A dummy wireless controller that does nothing
             NoopWirelessNetCtl::new(NetworkType::Wifi),
             // Will use the mDNS implementation based on the `zeroconf` crate
-            ZeroconfMdns,
+            ZeroconfMdnsResponder::new(),
             // The Bluetooth transport implementation based on the `bluer` crate.
             BluerGattPeripheral::new(None),
         ),

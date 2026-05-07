@@ -68,11 +68,11 @@ use log::info;
 
 use rs_matter_stack::eth::EthMatterStack;
 use rs_matter_stack::matter::crypto::{default_crypto, Crypto};
-use rs_matter_stack::matter::dm::clusters::desc;
-use rs_matter_stack::matter::dm::clusters::desc::ClusterHandler as _;
 use rs_matter_stack::matter::dm::clusters::app::on_off;
 use rs_matter_stack::matter::dm::clusters::app::on_off::test::TestOnOffDeviceLogic;
 use rs_matter_stack::matter::dm::clusters::app::on_off::OnOffHooks;
+use rs_matter_stack::matter::dm::clusters::desc;
+use rs_matter_stack::matter::dm::clusters::desc::ClusterHandler as _;
 use rs_matter_stack::matter::dm::devices::test::DAC_PRIVKEY;
 use rs_matter_stack::matter::dm::devices::test::{TEST_DEV_ATT, TEST_DEV_COMM, TEST_DEV_DET};
 use rs_matter_stack::matter::dm::devices::DEV_TYPE_ON_OFF_LIGHT;
@@ -81,9 +81,9 @@ use rs_matter_stack::matter::dm::{Async, Dataver, Endpoint, Node};
 use rs_matter_stack::matter::dm::{EmptyHandler, EpClMatcher};
 use rs_matter_stack::matter::error::Error;
 use rs_matter_stack::matter::persist::DirKvBlobStore;
+use rs_matter_stack::matter::transport::network::mdns::zeroconf::ZeroconfMdnsResponder;
 use rs_matter_stack::matter::utils::init::InitMaybeUninit;
 use rs_matter_stack::matter::{clusters, devices};
-use rs_matter_stack::mdns::ZeroconfMdns;
 
 use static_cell::StaticCell;
 
@@ -161,7 +161,7 @@ fn main() -> Result<(), Error> {
         // Will try to find a default network interface
         UnixNetifs,
         // Will use the mDNS implementation based on the `zeroconf` crate
-        ZeroconfMdns,
+        ZeroconfMdnsResponder::new(),
         // The crypto provider
         &crypto,
         // Our `AsyncHandler` + `AsyncMetadata` impl
