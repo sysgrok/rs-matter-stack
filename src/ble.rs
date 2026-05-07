@@ -3,7 +3,7 @@ use core::future::Future;
 use rs_matter::error::Error;
 use rs_matter::transport::network::btp::{AdvData, Btp};
 
-#[cfg(all(feature = "os", target_os = "linux"))]
+#[cfg(all(feature = "os", target_os = "linux", feature = "bluer"))]
 pub use bluer::*;
 #[cfg(feature = "zbus")]
 pub use bluez::*;
@@ -42,7 +42,7 @@ where
     }
 }
 
-#[cfg(all(feature = "os", target_os = "linux"))]
+#[cfg(all(feature = "os", target_os = "linux", feature = "bluer"))]
 #[allow(clippy::large_futures)]
 mod bluer {
     use rs_matter::error::Error;
