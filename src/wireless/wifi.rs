@@ -261,14 +261,6 @@ where
         ENDPOINT
     }
 
-    /// Return a metadata for the root (Endpoint 0) of the Matter Node
-    /// configured for BLE+Wifi network and supporting Matter Groups.
-    pub const fn root_endpoint_g() -> Endpoint<'static> {
-        const ENDPOINT: Endpoint<'static> = root_endpoint!(gwifi);
-
-        ENDPOINT
-    }
-
     /// Return a handler for the root (Endpoint 0) of the Matter Node
     /// configured for BLE+Wifi network.
     fn root_handler<'a, C, H>(

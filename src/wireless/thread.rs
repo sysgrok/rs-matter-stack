@@ -264,14 +264,6 @@ where
         ENDPOINT
     }
 
-    /// Return a metadata for the root (Endpoint 0) of the Matter Node
-    /// configured for BLE+Thread network and supporting Matter Groups.
-    pub const fn root_endpoint_g() -> Endpoint<'static> {
-        const ENDPOINT: Endpoint<'static> = root_endpoint!(gthread);
-
-        ENDPOINT
-    }
-
     /// Return a handler for the root (Endpoint 0) of the Matter Node
     /// configured for BLE+Thread network.
     fn root_handler<'a, N, H>(
