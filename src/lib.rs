@@ -18,7 +18,7 @@ use cfg_if::cfg_if;
 
 use edge_nal::{UdpBind, UdpSplit};
 
-use embassy_futures::select::{select, select3, select_slice};
+use embassy_futures::select::{select, select_slice};
 use embassy_time::Duration;
 
 use rs_matter::crypto::Crypto;
@@ -31,8 +31,7 @@ use rs_matter::dm::events::Events;
 use rs_matter::dm::networks::NetChangeNotif;
 use rs_matter::dm::subscriptions::Subscriptions;
 use rs_matter::dm::{
-    AsyncHandler, AsyncMetadata, AttrChangeNotifier, AttrId, ClusterId, DataModel, EndptId,
-    IMBuffer,
+    AttrChangeNotifier, AttrId, ClusterId, DataModel, DataModelHandler, EndptId, IMBuffer,
 };
 use rs_matter::error::{Error, ErrorCode};
 use rs_matter::pairing::qr::QrTextType;
@@ -678,7 +677,7 @@ where
     ) -> MatterStackDataModel<'_, C, H, S, W>
     where
         C: Crypto,
-        H: AsyncHandler + AsyncMetadata,
+        H: DataModelHandler,
         S: KvBlobStoreAccess,
         W: NetworksAccess,
     {
@@ -700,7 +699,7 @@ where
     ) -> Result<(), Error>
     where
         C: Crypto,
-        H: AsyncHandler + AsyncMetadata,
+        H: DataModelHandler,
         S: KvBlobStoreAccess,
         W: NetworksAccess,
     {
@@ -720,7 +719,7 @@ where
     ) -> Result<(), Error>
     where
         C: Crypto,
-        H: AsyncHandler + AsyncMetadata,
+        H: DataModelHandler,
         S: KvBlobStoreAccess,
         W: NetworksAccess,
     {
@@ -740,7 +739,7 @@ where
     ) -> Result<(), Error>
     where
         C: Crypto,
-        H: AsyncHandler + AsyncMetadata,
+        H: DataModelHandler,
         S: KvBlobStoreAccess,
         W: NetworksAccess,
     {
@@ -759,7 +758,7 @@ where
     ) -> Result<(), Error>
     where
         C: Crypto,
-        H: AsyncHandler + AsyncMetadata,
+        H: DataModelHandler,
         S: KvBlobStoreAccess,
         W: NetworksAccess,
     {
@@ -773,9 +772,8 @@ where
             self.bump,
             self.run_one_responder_with_bump::<MAX_BUSY_RESPONDERS, _>(responder.busy_responder())
         );
-        let mut sub = pin_alloc!(self.bump, responder.process_subscriptions());
 
-        select3(&mut actual, &mut busy, &mut sub).coalesce().await
+        select(&mut actual, &mut busy).coalesce().await
     }
 
     /// Run a responder with Q handlers using the provided bump allocator.
