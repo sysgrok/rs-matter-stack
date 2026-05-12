@@ -9,7 +9,7 @@ use rs_matter::dm::clusters::gen_diag::{GenDiag, NetifDiag};
 use rs_matter::dm::clusters::net_comm::DummyNetworkAccess;
 use rs_matter::dm::endpoints::{with_eth_sys, EthSysHandler};
 use rs_matter::dm::networks::NetChangeNotif;
-use rs_matter::dm::{AsyncHandler, AsyncMetadata, Endpoint};
+use rs_matter::dm::{DataModelHandler, Endpoint};
 use rs_matter::error::Error;
 use rs_matter::pairing::DiscoveryCapabilities;
 use rs_matter::persist::{KvBlobStore, KvBlobStoreAccess};
@@ -242,7 +242,7 @@ where
         N: NetifDiag + NetChangeNotif + 't,
         M: Mdns + 't,
         C: Crypto + 't,
-        H: AsyncHandler + AsyncMetadata + 't,
+        H: DataModelHandler + 't,
         S: KvBlobStoreAccess + 't,
         X: UserTask + 't,
     {
@@ -274,7 +274,7 @@ where
     where
         N: Ethernet,
         C: Crypto,
-        H: AsyncHandler + AsyncMetadata,
+        H: DataModelHandler,
         S: KvBlobStoreAccess,
         X: UserTask,
     {
@@ -309,7 +309,7 @@ where
     where
         N: Ethernet + 't,
         C: Crypto + 't,
-        H: AsyncHandler + AsyncMetadata + 't,
+        H: DataModelHandler + 't,
         S: KvBlobStoreAccess + 't,
         X: UserTask + 't,
     {
@@ -330,7 +330,7 @@ struct MatterStackEthernetTask<'a, const B: usize, E, C, H, S, X>
 where
     E: Embedding,
     C: Crypto,
-    H: AsyncMetadata + AsyncHandler,
+    H: DataModelHandler,
     S: KvBlobStoreAccess,
     X: UserTask,
 {
@@ -345,7 +345,7 @@ impl<const B: usize, E, C, H, S, X> EthernetTask for MatterStackEthernetTask<'_,
 where
     E: Embedding,
     C: Crypto,
-    H: AsyncMetadata + AsyncHandler,
+    H: DataModelHandler,
     S: KvBlobStoreAccess,
     X: UserTask,
 {

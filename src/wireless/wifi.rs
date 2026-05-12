@@ -6,6 +6,7 @@ use embassy_futures::select::{select, select3, select4};
 use rs_matter::crypto::{Crypto, RngCore};
 use rs_matter::dm::clusters::gen_comm::CommPolicy;
 use rs_matter::dm::clusters::gen_diag::GenDiag;
+use rs_matter::dm::clusters::gen_diag::NetifDiag;
 use rs_matter::dm::clusters::net_comm::{NetCtl, NetCtlStatus, NetworkType};
 use rs_matter::dm::clusters::wifi_diag::WifiDiag;
 use rs_matter::dm::endpoints::{with_wifi_sys, WifiSysHandler};
@@ -13,8 +14,7 @@ use rs_matter::dm::networks::wireless::{
     self, NetCtlWithStatusImpl, NoopWirelessNetCtl, WirelessMgr,
 };
 use rs_matter::dm::networks::NetChangeNotif;
-use rs_matter::dm::{clusters::gen_diag::NetifDiag, AsyncHandler};
-use rs_matter::dm::{AsyncMetadata, Endpoint};
+use rs_matter::dm::{DataModelHandler, Endpoint};
 use rs_matter::error::Error;
 use rs_matter::persist::KvBlobStoreAccess;
 use rs_matter::root_endpoint;
@@ -69,7 +69,7 @@ where
         D: Mdns + 't,
         G: GattPeripheral + 't,
         C: Crypto + 't,
-        H: AsyncHandler + AsyncMetadata + 't,
+        H: DataModelHandler + 't,
         S: KvBlobStoreAccess + 't,
         X: UserTask + 't,
     {
@@ -101,7 +101,7 @@ where
     where
         W: WifiCoex,
         C: Crypto,
-        H: AsyncHandler + AsyncMetadata,
+        H: DataModelHandler,
         S: KvBlobStoreAccess,
         U: UserTask,
     {
@@ -144,7 +144,7 @@ where
     where
         W: Wifi + Gatt,
         C: Crypto,
-        H: AsyncHandler + AsyncMetadata,
+        H: DataModelHandler,
         S: KvBlobStoreAccess,
         U: UserTask,
     {
@@ -176,7 +176,7 @@ where
     where
         W: WifiCoex + 't,
         C: Crypto + 't,
-        H: AsyncHandler + AsyncMetadata + 't,
+        H: DataModelHandler + 't,
         S: KvBlobStoreAccess + 't,
         U: UserTask + 't,
     {
@@ -200,7 +200,7 @@ where
     where
         W: Wifi + Gatt,
         C: Crypto,
-        H: AsyncHandler + AsyncMetadata,
+        H: DataModelHandler,
         S: KvBlobStoreAccess,
         U: UserTask,
     {
@@ -224,7 +224,7 @@ where
             if commissioned {
                 let net_ctl = NetCtlWithStatusImpl::new(
                     &self.network.net_state,
-                    NoopWirelessNetCtl::new(NetworkType::Thread),
+                    NoopWirelessNetCtl::new(NetworkType::Wifi),
                 );
 
                 let root_handler =
@@ -236,7 +236,7 @@ where
                     &self.network().networks,
                 );
 
-                self.matter().close_comm_window(dm.change_notify())?;
+                dm.close_comm_window()?;
             }
 
             Wifi::run(
@@ -461,7 +461,7 @@ impl<'a, const B: usize, E, C, H, S, U> GattTask
 where
     E: Embedding,
     C: Crypto,
-    H: AsyncMetadata + AsyncHandler,
+    H: DataModelHandler,
     S: KvBlobStoreAccess,
 {
     async fn run<P>(&mut self, peripheral: P) -> Result<(), Error>
@@ -501,7 +501,7 @@ impl<'a, const B: usize, E, C, H, S, X> WifiTask
 where
     E: Embedding,
     C: Crypto,
-    H: AsyncMetadata + AsyncHandler,
+    H: DataModelHandler,
     S: KvBlobStoreAccess,
     X: UserTask,
 {
@@ -576,7 +576,7 @@ impl<'a, const B: usize, E, C, H, S, X> WifiCoexTask
 where
     E: Embedding,
     C: Crypto,
-    H: AsyncMetadata + AsyncHandler,
+    H: DataModelHandler,
     S: KvBlobStoreAccess,
     X: UserTask,
 {
