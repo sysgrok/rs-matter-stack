@@ -145,10 +145,10 @@ const LIGHT_ENDPOINT_ID: u16 = 1;
 const NODE: Node = Node {
     endpoints: &[
         WifiMatterStack::<0, ()>::root_endpoint(),
-        Endpoint {
-            id: LIGHT_ENDPOINT_ID,
-            device_types: devices!(DEV_TYPE_ON_OFF_LIGHT),
-            clusters: clusters!(DescHandler::CLUSTER, TestOnOffDeviceLogic::CLUSTER),
-        },
+        Endpoint::new(
+            LIGHT_ENDPOINT_ID,
+            devices!(DEV_TYPE_ON_OFF_LIGHT),
+            clusters!(DescHandler::CLUSTER, TestOnOffDeviceLogic::CLUSTER),
+        ),
     ],
 };
