@@ -45,6 +45,18 @@ The [`rs-matter-embassy`](https://github.com/ivmarkov/rs-matter-embassy) crate p
 
 The [`esp-idf-matter`](https://github.com/ivmarkov/esp-idf-matter) crate provides implementations for `KvBlobStore`, `NetifDiag`, `GattPeripheral` and others for the [ESP-IDF SDK](https://github.com/esp-rs/esp-idf-svc).
 
+## Event ring-buffer
+
+The Matter event subsystem is gated by mutually-exclusive Cargo features `events-ringbuf-size-{0,64,128,256,512,1024,2048}`. The size sets the per-priority buffer in [`Events<N>`](https://github.com/project-chip/rs-matter/blob/main/rs-matter/src/dm/events.rs).
+
+**The default is `events-ringbuf-size-0`**, which disables event emission: `emit_event()` returns `Ok` and the device-side event counter still advances, but no bytes are stored and controllers never see any events. Devices that emit events &mdash; including any Generic Switch (0x000F), and any device required to send `BasicInformation::StartUp` on boot (Matter Core &sect;11.1.6) &mdash; must enable a non-zero size, e.g.:
+
+```toml
+rs-matter-stack = { ..., features = ["events-ringbuf-size-512"] }
+```
+
+Sizing rule of thumb: 256 fits a few back-to-back events; 512 covers a burst of multi-press / scene activation; 1024+ if a chatty handler is expected.
+
 ## Example
 
 (See also [All examples](#all-examples))
