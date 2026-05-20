@@ -154,6 +154,10 @@ where
 
         self.matter.reset_persist(&mut kv, buf).await?;
 
+        // Reset the events counter so we don't carry a stale watermark
+        // across a factory reset (Matter Core spec R1.5.1, §7.14.1.1).
+        self.events.reset_persist(&mut kv, buf).await?;
+
         self.network
             .networks
             .get_mut()
@@ -171,6 +175,10 @@ where
         let buf = buf.borrow_mut();
 
         self.matter.load_persist(&mut kv, buf).await?;
+
+        // Restore the events counter so EventNumber stays monotonic across
+        // restarts (Matter Core spec R1.5.1, §7.14.1.1 SHALL).
+        self.events.load_persist(&mut kv, buf).await?;
 
         self.network
             .networks

@@ -175,25 +175,37 @@ where
     }
 
     /// Reset the Matter instance to the factory defaults by removing all fabrics and basic info settings
-    pub async fn reset<S>(&mut self, kv: S) -> Result<(), Error>
+    pub async fn reset<S>(&mut self, mut kv: S) -> Result<(), Error>
     where
         S: KvBlobStore,
     {
         let mut buf = unwrap!(self.store_buf.try_get());
         let buf = buf.borrow_mut();
 
-        self.matter.reset_persist(kv, buf).await
+        self.matter.reset_persist(&mut kv, buf).await?;
+
+        // Reset the events counter so we don't carry a stale watermark
+        // across a factory reset (Matter Core spec R1.5.1, §7.14.1.1).
+        self.events.reset_persist(kv, buf).await?;
+
+        Ok(())
     }
 
     /// Load the persisted state from the provided `KvBlobStore` implementation.
-    pub async fn load<S>(&mut self, kv: S) -> Result<(), Error>
+    pub async fn load<S>(&mut self, mut kv: S) -> Result<(), Error>
     where
         S: KvBlobStore,
     {
         let mut buf = unwrap!(self.store_buf.try_get());
         let buf = buf.borrow_mut();
 
-        self.matter.load_persist(kv, buf).await
+        self.matter.load_persist(&mut kv, buf).await?;
+
+        // Restore the events counter so EventNumber stays monotonic across
+        // restarts (Matter Core spec R1.5.1, §7.14.1.1 SHALL).
+        self.events.load_persist(kv, buf).await?;
+
+        Ok(())
     }
 
     /// Run the startup sequence of the stack, which includes loading the persisted state
