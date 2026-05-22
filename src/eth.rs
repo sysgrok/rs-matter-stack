@@ -7,9 +7,11 @@ use rs_matter::crypto::{Crypto, RngCore};
 use rs_matter::dm::clusters::gen_comm::CommPolicy;
 use rs_matter::dm::clusters::gen_diag::{GenDiag, NetifDiag};
 use rs_matter::dm::clusters::net_comm::DummyNetworkAccess;
-use rs_matter::dm::endpoints::{with_eth_sys, EthSysHandler};
+use rs_matter::dm::clusters::sw_diag::SwDiag;
+use rs_matter::dm::clusters::time_sync::TimeSync;
+use rs_matter::dm::endpoints::{eth_sys_handler, EthSysHandler, ROOT_ENDPOINT_ID};
 use rs_matter::dm::networks::NetChangeNotif;
-use rs_matter::dm::{DataModelHandler, Endpoint};
+use rs_matter::dm::{ChainedHandler, DataModelHandler, Endpoint, EpClMatcher};
 use rs_matter::error::Error;
 use rs_matter::pairing::DiscoveryCapabilities;
 use rs_matter::persist::{KvBlobStore, KvBlobStoreAccess};
@@ -163,15 +165,16 @@ where
 
     /// Return a handler for the root (Endpoint 0) of the Matter Node
     /// configured for Ethernet network.
-    fn root_handler<'a, H>(
+    fn root_handler<'a>(
         &self,
         comm_policy: &'a dyn CommPolicy,
         gen_diag: &'a dyn GenDiag,
         netif_diag: &'a dyn NetifDiag,
+        time_sync: &'a dyn TimeSync,
+        sw_diag: &'a dyn SwDiag,
         rand: impl RngCore + Copy,
-        handler: H,
-    ) -> EthSysHandler<'a, H> {
-        with_eth_sys(comm_policy, gen_diag, netif_diag, rand, handler)
+    ) -> EthSysHandler<'a> {
+        eth_sys_handler(comm_policy, gen_diag, netif_diag, time_sync, sw_diag, rand)
     }
 
     /// Reset the Matter instance to the factory defaults by removing all fabrics and basic info settings
@@ -357,12 +360,22 @@ where
     {
         info!("Ethernet driver started");
 
-        let handler =
-            self.stack
-                .root_handler(&false, &(), &netif, self.crypto.weak_rand()?, &self.handler);
+        // The sys-handler chain (built per phase so per-phase `NetCtl` /
+        // diag implementations can vary) covers every cluster on the
+        // root endpoint; route anything on EP0 to it, and any other
+        // endpoint to the user's handler. `&self.handler` doubles as
+        // the `Metadata` provider (`(M, H)` form for `DataModel::new`).
+        let sys = self
+            .stack
+            .root_handler(&false, &(), &netif, &(), &(), self.crypto.weak_rand()?);
+        let combined = ChainedHandler::new(
+            EpClMatcher::new(Some(ROOT_ENDPOINT_ID), None),
+            sys,
+            &self.handler,
+        );
         let dm = self.stack.dm(
             &self.crypto,
-            (&self.handler, handler),
+            (&self.handler, combined),
             &self.kv,
             DummyNetworkAccess,
         );

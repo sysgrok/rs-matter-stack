@@ -41,7 +41,6 @@ use rs_matter::sc::pase::MAX_COMM_WINDOW_TIMEOUT_SECS;
 use rs_matter::transport::network::{
     Address, ChainedNetwork, NetworkMulticast, NetworkReceive, NetworkSend, NoNetwork,
 };
-use rs_matter::utils::epoch::Epoch;
 use rs_matter::utils::init::{init, Init};
 use rs_matter::utils::select::Coalesce;
 use rs_matter::utils::storage::pooled::PooledBuffers;
@@ -262,36 +261,18 @@ where
     N: Network,
 {
     /// Create a new `MatterStack` instance.
-    #[cfg(feature = "std")]
-    #[allow(clippy::large_stack_frames)]
-    #[inline(always)]
-    pub const fn new_default(
-        dev_det: &'a BasicInfoConfig,
-        dev_comm: BasicCommData,
-        dev_att: &'a dyn DeviceAttestation,
-    ) -> Self {
-        Self::new(
-            dev_det,
-            dev_comm,
-            dev_att,
-            rs_matter::utils::epoch::sys_epoch,
-        )
-    }
-
-    /// Create a new `MatterStack` instance.
     #[allow(clippy::large_stack_frames)]
     #[inline(always)]
     pub const fn new(
         dev_det: &'a BasicInfoConfig,
         dev_comm: BasicCommData,
         dev_att: &'a dyn DeviceAttestation,
-        epoch: Epoch,
     ) -> Self {
         Self {
-            matter: Matter::new(dev_det, dev_comm, dev_att, epoch, MATTER_PORT),
+            matter: Matter::new(dev_det, dev_comm, dev_att, MATTER_PORT),
             buffers: PooledBuffers::new(0),
             subscriptions: Subscriptions::new(),
-            events: Events::new(epoch),
+            events: Events::new(),
             store_buf: MatterKvBlobStoreBuf::new(),
             bump: Bump::new(),
             run_lock: IfMutex::new(()),
@@ -300,40 +281,22 @@ where
         }
     }
 
-    /// Create a new `MatterStack` instance.
-    #[cfg(feature = "std")]
-    #[allow(clippy::large_stack_frames)]
-    pub fn init_default(
-        dev_det: &'a BasicInfoConfig,
-        dev_comm: BasicCommData,
-        dev_att: &'a dyn DeviceAttestation,
-    ) -> impl Init<Self> {
-        Self::init(
-            dev_det,
-            dev_comm,
-            dev_att,
-            rs_matter::utils::epoch::sys_epoch,
-        )
-    }
-
     #[allow(clippy::large_stack_frames)]
     pub fn init(
         dev_det: &'a BasicInfoConfig,
         dev_comm: BasicCommData,
         dev_att: &'a dyn DeviceAttestation,
-        epoch: Epoch,
     ) -> impl Init<Self> {
         init!(Self {
             matter <- Matter::init(
                 dev_det,
                 dev_comm,
                 dev_att,
-                epoch,
                 MATTER_PORT,
             ),
             buffers <- PooledBuffers::init(0),
             subscriptions <- Subscriptions::init(),
-            events <- Events::init(epoch),
+            events <- Events::init(),
             store_buf <- MatterKvBlobStoreBuf::init(),
             bump <- Bump::init(),
             run_lock <- IfMutex::init(()),

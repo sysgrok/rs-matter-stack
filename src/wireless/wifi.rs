@@ -8,13 +8,15 @@ use rs_matter::dm::clusters::gen_comm::CommPolicy;
 use rs_matter::dm::clusters::gen_diag::GenDiag;
 use rs_matter::dm::clusters::gen_diag::NetifDiag;
 use rs_matter::dm::clusters::net_comm::{NetCtl, NetCtlStatus, NetworkType};
+use rs_matter::dm::clusters::sw_diag::SwDiag;
+use rs_matter::dm::clusters::time_sync::TimeSync;
 use rs_matter::dm::clusters::wifi_diag::WifiDiag;
-use rs_matter::dm::endpoints::{with_wifi_sys, WifiSysHandler};
+use rs_matter::dm::endpoints::{wifi_sys_handler, WifiSysHandler, ROOT_ENDPOINT_ID};
 use rs_matter::dm::networks::wireless::{
     self, NetCtlWithStatusImpl, NoopWirelessNetCtl, WirelessMgr,
 };
 use rs_matter::dm::networks::NetChangeNotif;
-use rs_matter::dm::{DataModelHandler, Endpoint};
+use rs_matter::dm::{ChainedHandler, DataModelHandler, Endpoint, EpClMatcher};
 use rs_matter::error::Error;
 use rs_matter::persist::KvBlobStoreAccess;
 use rs_matter::root_endpoint;
@@ -227,14 +229,14 @@ where
                     NoopWirelessNetCtl::new(NetworkType::Wifi),
                 );
 
-                let root_handler =
-                    self.root_handler(&false, &(), &(), &net_ctl, crypto.weak_rand()?, &handler);
-                let dm = self.dm(
-                    &crypto,
-                    (&handler, root_handler),
-                    &kv,
-                    &self.network().networks,
+                let sys =
+                    self.root_handler(&false, &(), &(), &net_ctl, &(), &(), crypto.weak_rand()?);
+                let combined = ChainedHandler::new(
+                    EpClMatcher::new(Some(ROOT_ENDPOINT_ID), None),
+                    sys,
+                    &handler,
                 );
+                let dm = self.dm(&crypto, (&handler, combined), &kv, &self.network().networks);
 
                 dm.close_comm_window()?;
             }
@@ -263,26 +265,29 @@ where
 
     /// Return a handler for the root (Endpoint 0) of the Matter Node
     /// configured for BLE+Wifi network.
-    fn root_handler<'a, C, H>(
+    #[allow(clippy::too_many_arguments)]
+    fn root_handler<'a, C>(
         &'a self,
         comm_policy: &'a dyn CommPolicy,
         gen_diag: &'a dyn GenDiag,
         netif_diag: &'a dyn NetifDiag,
         net_ctl: &'a C,
+        time_sync: &'a dyn TimeSync,
+        sw_diag: &'a dyn SwDiag,
         rand: impl RngCore + Copy,
-        handler: H,
-    ) -> WifiSysHandler<'a, &'a C, H>
+    ) -> WifiSysHandler<'a, &'a C>
     where
         C: NetCtl + NetCtlStatus + WifiDiag,
     {
-        with_wifi_sys(
+        wifi_sys_handler(
             comm_policy,
             gen_diag,
             netif_diag,
             net_ctl,
+            time_sync,
+            sw_diag,
             net_ctl,
             rand,
-            handler,
         )
     }
 }
@@ -473,17 +478,23 @@ where
             NoopWirelessNetCtl::new(NetworkType::Wifi),
         );
 
-        let handler = self.stack.root_handler(
+        let sys = self.stack.root_handler(
             &false,
             &(),
             &(),
             &net_ctl,
+            &(),
+            &(),
             self.crypto.weak_rand()?,
+        );
+        let combined = ChainedHandler::new(
+            EpClMatcher::new(Some(ROOT_ENDPOINT_ID), None),
+            sys,
             &self.handler,
         );
         let dm = self.stack.dm(
             &self.crypto,
-            (&self.handler, handler),
+            (&self.handler, combined),
             &self.kv,
             &self.stack.network().networks,
         );
@@ -526,17 +537,23 @@ where
 
         let net_ctl_s = NetCtlWithStatusImpl::new(&self.stack.network.net_state, &net_ctl);
 
-        let handler = self.stack.root_handler(
+        let sys = self.stack.root_handler(
             &false,
             &(),
             &netif,
             &net_ctl_s,
+            &(),
+            &(),
             self.crypto.weak_rand()?,
+        );
+        let combined = ChainedHandler::new(
+            EpClMatcher::new(Some(ROOT_ENDPOINT_ID), None),
+            sys,
             &self.handler,
         );
         let dm = self.stack.dm(
             &self.crypto,
-            (&self.handler, handler),
+            (&self.handler, combined),
             &self.kv,
             &self.stack.network().networks,
         );
@@ -599,17 +616,23 @@ where
 
         let net_ctl_s = NetCtlWithStatusImpl::new(&self.stack.network.net_state, &net_ctl);
 
-        let handler = self.stack.root_handler(
+        let sys = self.stack.root_handler(
             &true,
             &(),
             &netif,
             &net_ctl_s,
+            &(),
+            &(),
             self.crypto.weak_rand()?,
+        );
+        let combined = ChainedHandler::new(
+            EpClMatcher::new(Some(ROOT_ENDPOINT_ID), None),
+            sys,
             &self.handler,
         );
         let dm = self.stack.dm(
             &self.crypto,
-            (&self.handler, handler),
+            (&self.handler, combined),
             &self.kv,
             &self.stack.network().networks,
         );
