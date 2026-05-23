@@ -252,6 +252,7 @@ where
     store_buf: MatterKvBlobStoreBuf,
     bump: Bump<B>,
     run_lock: IfMutex<()>,
+    startup_event_emitted: IfMutex<bool>,
     #[allow(unused)]
     network: N,
     //netif_conf: Signal<Option<NetifConf>>,
@@ -277,6 +278,7 @@ where
             store_buf: MatterKvBlobStoreBuf::new(),
             bump: Bump::new(),
             run_lock: IfMutex::new(()),
+            startup_event_emitted: IfMutex::new(false),
             network: N::INIT,
             //netif_conf: Signal::new(None),
         }
@@ -301,6 +303,7 @@ where
             store_buf <- MatterKvBlobStoreBuf::init(),
             bump <- Bump::init(),
             run_lock <- IfMutex::init(()),
+            startup_event_emitted <- IfMutex::init(false),
             network <- N::init(),
             //netif_conf: Signal::new(None),
         })
@@ -671,7 +674,7 @@ where
         // Reset the Matter transport buffers and all sessions first
         // self.matter().reset_transport()?;
 
-        self.emit_startup_event(dm);
+        self.emit_startup_event_once(dm).await;
 
         let mut responder = pin!(self.run_responder(dm));
         let mut dm_job = pin!(dm.run());
@@ -693,7 +696,7 @@ where
         // Reset the Matter transport buffers and all sessions first
         // self.matter().reset_transport()?;
 
-        self.emit_startup_event(dm);
+        self.emit_startup_event_once(dm).await;
 
         let mut responder = pin_alloc!(self.bump, self.run_responder_with_bump(dm));
         let mut dm_job = pin!(dm.run());
@@ -703,19 +706,29 @@ where
 
     /// Emit `BasicInformation::StartUp` on the root endpoint, as required
     /// by Matter 1.5.1 Core §11.1.6.1 (SHALL).
-    fn emit_startup_event<C, H, S, W>(&self, dm: &MatterStackDataModel<'_, C, H, S, W>)
+    async fn emit_startup_event_once<C, H, S, W>(&self, dm: &MatterStackDataModel<'_, C, H, S, W>)
     where
         C: Crypto,
         H: DataModelHandler,
         S: KvBlobStoreAccess,
         W: NetworksAccess,
     {
+        let mut emitted = self.startup_event_emitted.lock().await;
+
+        if *emitted {
+            return;
+        }
+
         let sw_ver = self.matter().dev_det().sw_ver;
         match StartUp::emit_for(dm, 0, |b| b.software_version(sw_ver)?.end()) {
-            Ok(event_number) => info!(
-                "BasicInformation::StartUp emitted (sw_ver={}, event_number={})",
-                sw_ver, event_number,
-            ),
+            Ok(event_number) => {
+                *emitted = true;
+
+                info!(
+                    "BasicInformation::StartUp emitted (sw_ver={}, event_number={})",
+                    sw_ver, event_number,
+                );
+            }
             Err(e) => warn!("Failed to emit BasicInformation::StartUp: {:?}", e),
         }
     }
