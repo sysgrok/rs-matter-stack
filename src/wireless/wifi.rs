@@ -1,4 +1,5 @@
 use core::future::Future;
+use core::marker::PhantomData;
 use core::pin::pin;
 
 use embassy_futures::select::{select, select3, select4};
@@ -26,7 +27,7 @@ use rs_matter::utils::select::Coalesce;
 use crate::mdns::Mdns;
 use crate::nal::NetStack;
 use crate::network::Embedding;
-use crate::wireless::{GattPeripheral, MatterStackWirelessTask};
+use crate::wireless::{GattPeripheral, MatterStackWirelessTask, WirelessNetCtl};
 use crate::{pin_alloc, UserTask};
 
 use super::{Gatt, GattTask, PreexistingWireless, WirelessMatterStack};
@@ -182,12 +183,25 @@ where
         S: KvBlobStoreAccess + 't,
         U: UserTask + 't,
     {
-        wifi.run(MatterStackWirelessTask {
+        // The coex task never builds a `WirelessNetCtl` chain via `Q`, so its
+        // phantom net-ctl type is an irrelevant placeholder.
+        wifi.run(MatterStackWirelessTask::<
+            '_,
+            B,
+            wireless::Wifi,
+            E,
+            C,
+            H,
+            S,
+            U,
+            NoopWirelessNetCtl,
+        > {
             stack: self,
             crypto,
             handler,
             kv,
             user_task: user,
+            _net_ctl: PhantomData,
         })
     }
 
@@ -212,12 +226,23 @@ where
             if !commissioned {
                 Gatt::run(
                     &mut wifi,
-                    MatterStackWirelessTask {
+                    MatterStackWirelessTask::<
+                        '_,
+                        B,
+                        wireless::Wifi,
+                        E,
+                        &C,
+                        &H,
+                        &S,
+                        &mut U,
+                        <W as Wifi>::NetCtl<'_>,
+                    > {
                         stack: self,
                         crypto: &crypto,
                         handler: &handler,
                         kv: &kv,
                         user_task: &mut user,
+                        _net_ctl: PhantomData,
                     },
                 )
                 .await?;
@@ -226,7 +251,7 @@ where
             if commissioned {
                 let net_ctl = NetCtlWithStatusImpl::new(
                     &self.network.net_state,
-                    NoopWirelessNetCtl::new(NetworkType::Wifi),
+                    WirelessNetCtl::<<W as Wifi>::NetCtl<'_>>::Commissioning(NetworkType::Wifi),
                 );
 
                 let sys =
@@ -243,12 +268,23 @@ where
 
             Wifi::run(
                 &mut wifi,
-                MatterStackWirelessTask {
+                MatterStackWirelessTask::<
+                    '_,
+                    B,
+                    wireless::Wifi,
+                    E,
+                    &C,
+                    &H,
+                    &S,
+                    &mut U,
+                    <W as Wifi>::NetCtl<'_>,
+                > {
                     stack: self,
                     crypto: &crypto,
                     handler: &handler,
                     kv: &kv,
                     user_task: &mut user,
+                    _net_ctl: PhantomData,
                 },
             )
             .await?;
@@ -333,6 +369,15 @@ where
 
 /// A trait for running a task within a context where the wireless interface is initialized and operable
 pub trait Wifi {
+    /// The Wifi network controller type this driver produces in its operational
+    /// phase. Naming it here lets the commissioning and operational handler chains
+    /// be built with the SAME `WirelessNetCtl<Self::NetCtl<'_>>` net-ctl type,
+    /// yielding a single handler-chain monomorphization. The bound is Wifi's own
+    /// (`WifiDiag`) — a Wifi controller is never asked to be a Thread one.
+    type NetCtl<'a>: NetCtl + WifiDiag + NetChangeNotif
+    where
+        Self: 'a;
+
     /// Setup the radio to operate in wireless (Wifi or Thread) mode
     /// and run the given task
     async fn run<T>(&mut self, task: T) -> Result<(), Error>
@@ -344,6 +389,11 @@ impl<T> Wifi for &mut T
 where
     T: Wifi,
 {
+    type NetCtl<'a>
+        = T::NetCtl<'a>
+    where
+        Self: 'a;
+
     fn run<A>(&mut self, task: A) -> impl Future<Output = Result<(), Error>>
     where
         A: WifiTask,
@@ -429,6 +479,13 @@ where
     C: NetCtl + WifiDiag + NetChangeNotif,
     M: Mdns,
 {
+    // The task receives `&self.net_ctl` (a `&C`), so the chain net-ctl type is
+    // `&'a C` (which satisfies the bounds via the blanket `impl Trait for &T`).
+    type NetCtl<'a>
+        = &'a C
+    where
+        Self: 'a;
+
     async fn run<T>(&mut self, mut task: T) -> Result<(), Error>
     where
         T: WifiTask,
@@ -461,13 +518,14 @@ where
     }
 }
 
-impl<'a, const B: usize, E, C, H, S, U> GattTask
-    for MatterStackWirelessTask<'a, B, wireless::Wifi, E, C, H, S, U>
+impl<'a, const B: usize, E, C, H, S, U, Q> GattTask
+    for MatterStackWirelessTask<'a, B, wireless::Wifi, E, C, H, S, U, Q>
 where
     E: Embedding,
     C: Crypto,
     H: DataModelHandler,
     S: KvBlobStoreAccess,
+    Q: NetCtl + WifiDiag + NetChangeNotif,
 {
     async fn run<P>(&mut self, peripheral: P) -> Result<(), Error>
     where
@@ -475,7 +533,7 @@ where
     {
         let net_ctl = NetCtlWithStatusImpl::new(
             &self.stack.network.net_state,
-            NoopWirelessNetCtl::new(NetworkType::Wifi),
+            WirelessNetCtl::<Q>::Commissioning(NetworkType::Wifi),
         );
 
         let sys = self.stack.root_handler(
@@ -507,14 +565,15 @@ where
     }
 }
 
-impl<'a, const B: usize, E, C, H, S, X> WifiTask
-    for MatterStackWirelessTask<'a, B, wireless::Wifi, E, C, H, S, X>
+impl<'a, const B: usize, E, C, H, S, X, Z> WifiTask
+    for MatterStackWirelessTask<'a, B, wireless::Wifi, E, C, H, S, X, Z>
 where
     E: Embedding,
     C: Crypto,
     H: DataModelHandler,
     S: KvBlobStoreAccess,
     X: UserTask,
+    Z: NetCtl + WifiDiag + NetChangeNotif,
 {
     async fn run<T, N, Q, D>(
         &mut self,
@@ -535,7 +594,10 @@ where
 
         let mut mgr = WirelessMgr::new(&self.stack.network.networks, &net_ctl, &mut buf);
 
-        let net_ctl_s = NetCtlWithStatusImpl::new(&self.stack.network.net_state, &net_ctl);
+        let net_ctl_s = NetCtlWithStatusImpl::new(
+            &self.stack.network.net_state,
+            WirelessNetCtl::Operational(&net_ctl),
+        );
 
         let sys = self.stack.root_handler(
             &false,
@@ -588,14 +650,15 @@ where
     }
 }
 
-impl<'a, const B: usize, E, C, H, S, X> WifiCoexTask
-    for MatterStackWirelessTask<'a, B, wireless::Wifi, E, C, H, S, X>
+impl<'a, const B: usize, E, C, H, S, X, Z> WifiCoexTask
+    for MatterStackWirelessTask<'a, B, wireless::Wifi, E, C, H, S, X, Z>
 where
     E: Embedding,
     C: Crypto,
     H: DataModelHandler,
     S: KvBlobStoreAccess,
     X: UserTask,
+    Z: NetCtl + WifiDiag + NetChangeNotif,
 {
     async fn run<T, N, Q, D, G>(
         &mut self,
@@ -614,7 +677,10 @@ where
     {
         info!("Wifi and BLE drivers started");
 
-        let net_ctl_s = NetCtlWithStatusImpl::new(&self.stack.network.net_state, &net_ctl);
+        let net_ctl_s = NetCtlWithStatusImpl::new(
+            &self.stack.network.net_state,
+            WirelessNetCtl::Operational(&net_ctl),
+        );
 
         let sys = self.stack.root_handler(
             &true,

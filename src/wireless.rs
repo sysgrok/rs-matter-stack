@@ -1,12 +1,16 @@
 use core::borrow::BorrowMut;
+use core::marker::PhantomData;
 use core::pin::pin;
 
 use embassy_futures::select::{select, select3};
 
 use rs_matter::crypto::Crypto;
 use rs_matter::dm::clusters::gen_diag::NetifDiag;
-use rs_matter::dm::clusters::net_comm::{NetCtl, SharedNetworks};
+use rs_matter::dm::clusters::net_comm::{
+    self, NetCtl, NetCtlError, NetworkType, SharedNetworks, WirelessCreds,
+};
 use rs_matter::dm::clusters::wifi_diag::WirelessDiag;
+use rs_matter::dm::clusters::{thread_diag, wifi_diag};
 use rs_matter::dm::networks::wireless::{
     NetCtlState, WirelessMgr, WirelessNetwork, WirelessNetworks, MAX_CREDS_SIZE,
 };
@@ -19,6 +23,7 @@ use rs_matter::transport::network::NoNetwork;
 use rs_matter::utils::cell::RefCell;
 use rs_matter::utils::init::{init, zeroed, Init};
 use rs_matter::utils::select::Coalesce;
+use rs_matter::utils::sync::DynBase;
 use rs_matter::utils::sync::{blocking, IfMutex};
 
 use crate::ble::GattPeripheral;
@@ -94,6 +99,324 @@ where
     /// Return a reference to the networks storage.
     pub fn networks(&self) -> &SharedNetworks<WirelessNetworks<MAX_WIRELESS_NETWORKS, T>> {
         &self.networks
+    }
+}
+
+/// A composite wireless network controller that is the SAME concrete type during
+/// both the (BLE) commissioning phase and the operational (Thread/Wifi) phase.
+///
+/// This exists purely to avoid building two structurally-different Matter handler
+/// chains per device. `DataModel::handle` and every generated cluster handler
+/// adaptor are monomorphized over the whole handler-chain tuple type; if the
+/// net-ctl slot has a different type per phase, the entire dispatch tree is
+/// compiled twice (~tens of KiB of duplicated `.text` on embedded targets).
+///
+/// By using `WirelessNetCtl<Q>` in *both* phases — `Commissioning` before the
+/// operational controller exists, `Operational(&Q)` afterwards — the chain type
+/// is identical across phases and the dispatch tree monomorphizes once.
+///
+/// The `Commissioning` variant reproduces the behavior of the former
+/// `NoopWirelessNetCtl`: `scan` errors with `InvalidAction`, `connect` only
+/// checks the creds match the network type, and every diag returns its default.
+/// The `Operational` variant delegates to the real controller `Q`.
+///
+/// `Q` is named identically at every phase via the wireless driver's associated
+/// net-ctl type (see the `Thread`/`Gatt` driver traits), so even the
+/// commissioning phase — which has no controller value — can still name the type.
+pub enum WirelessNetCtl<'a, Q> {
+    /// Commissioning phase: no operational controller yet (BLE only).
+    Commissioning(NetworkType),
+    /// Operational phase: delegate to the real controller.
+    Operational(&'a Q),
+}
+
+impl<Q> net_comm::NetCtl for WirelessNetCtl<'_, Q>
+where
+    Q: net_comm::NetCtl,
+{
+    fn net_type(&self) -> NetworkType {
+        match self {
+            Self::Commissioning(net_type) => *net_type,
+            Self::Operational(q) => q.net_type(),
+        }
+    }
+
+    fn connect_max_time_seconds(&self) -> u8 {
+        match self {
+            Self::Commissioning(_) => 0,
+            Self::Operational(q) => q.connect_max_time_seconds(),
+        }
+    }
+
+    fn scan_max_time_seconds(&self) -> u8 {
+        match self {
+            Self::Commissioning(_) => 0,
+            Self::Operational(q) => q.scan_max_time_seconds(),
+        }
+    }
+
+    fn supported_wifi_bands<F>(&self, f: F) -> Result<(), Error>
+    where
+        F: FnMut(net_comm::WiFiBandEnum) -> Result<(), Error>,
+    {
+        match self {
+            Self::Commissioning(_) => Ok(()),
+            Self::Operational(q) => q.supported_wifi_bands(f),
+        }
+    }
+
+    fn supported_thread_features(&self) -> net_comm::ThreadCapabilitiesBitmap {
+        match self {
+            Self::Commissioning(_) => net_comm::ThreadCapabilitiesBitmap::empty(),
+            Self::Operational(q) => q.supported_thread_features(),
+        }
+    }
+
+    fn thread_version(&self) -> u16 {
+        match self {
+            Self::Commissioning(_) => 0,
+            Self::Operational(q) => q.thread_version(),
+        }
+    }
+
+    async fn scan<F>(&self, network: Option<&[u8]>, f: F) -> Result<(), NetCtlError>
+    where
+        F: FnMut(&net_comm::NetworkScanInfo) -> Result<(), Error>,
+    {
+        match self {
+            // Matches the former `NoopWirelessNetCtl::scan`.
+            Self::Commissioning(_) => Err(NetCtlError::Other(
+                rs_matter::error::ErrorCode::InvalidAction.into(),
+            )),
+            Self::Operational(q) => q.scan(network, f).await,
+        }
+    }
+
+    async fn connect(&self, creds: &WirelessCreds<'_>) -> Result<(), NetCtlError> {
+        match self {
+            // Matches the former `NoopWirelessNetCtl::connect`.
+            Self::Commissioning(net_type) => Ok(creds.check_match(*net_type)?),
+            Self::Operational(q) => q.connect(creds).await,
+        }
+    }
+}
+
+impl<Q> NetChangeNotif for WirelessNetCtl<'_, Q>
+where
+    Q: NetChangeNotif,
+{
+    async fn wait_changed(&self) {
+        match self {
+            Self::Commissioning(_) => core::future::pending().await,
+            Self::Operational(q) => q.wait_changed().await,
+        }
+    }
+}
+
+#[cfg(feature = "sync-mutex")]
+impl<Q> DynBase for WirelessNetCtl<'_, Q> where Q: Send + Sync {}
+
+#[cfg(not(feature = "sync-mutex"))]
+impl<Q> DynBase for WirelessNetCtl<'_, Q> {}
+
+impl<Q> WirelessDiag for WirelessNetCtl<'_, Q>
+where
+    Q: WirelessDiag,
+{
+    fn connected(&self) -> Result<bool, Error> {
+        match self {
+            Self::Commissioning(_) => Ok(false),
+            Self::Operational(q) => q.connected(),
+        }
+    }
+}
+
+// For `WifiDiag`/`ThreadDiag`, the `Commissioning` variant reproduces each
+// method's trait default (matching the former `NoopWirelessNetCtl`, which impl'd
+// both traits empty), and the `Operational` variant delegates to the real
+// controller. The defaults are: `Ok(None)` for the scalar accessors, `Ok(())` /
+// `f(None)` for the closure-based accessors, and `Nullable::none()` for the
+// `WifiDiag` nullable accessors — kept in sync with rs-matter's trait defaults.
+impl<Q> wifi_diag::WifiDiag for WirelessNetCtl<'_, Q>
+where
+    Q: wifi_diag::WifiDiag,
+{
+    fn bssid(&self, f: &mut dyn FnMut(Option<&[u8]>) -> Result<(), Error>) -> Result<(), Error> {
+        match self {
+            Self::Commissioning(_) => f(None),
+            Self::Operational(q) => q.bssid(f),
+        }
+    }
+
+    fn security_type(
+        &self,
+    ) -> Result<rs_matter::tlv::Nullable<wifi_diag::SecurityTypeEnum>, Error> {
+        match self {
+            Self::Commissioning(_) => Ok(rs_matter::tlv::Nullable::none()),
+            Self::Operational(q) => q.security_type(),
+        }
+    }
+
+    fn wi_fi_version(&self) -> Result<rs_matter::tlv::Nullable<wifi_diag::WiFiVersionEnum>, Error> {
+        match self {
+            Self::Commissioning(_) => Ok(rs_matter::tlv::Nullable::none()),
+            Self::Operational(q) => q.wi_fi_version(),
+        }
+    }
+
+    fn channel_number(&self) -> Result<rs_matter::tlv::Nullable<u16>, Error> {
+        match self {
+            Self::Commissioning(_) => Ok(rs_matter::tlv::Nullable::none()),
+            Self::Operational(q) => q.channel_number(),
+        }
+    }
+
+    fn rssi(&self) -> Result<rs_matter::tlv::Nullable<i8>, Error> {
+        match self {
+            Self::Commissioning(_) => Ok(rs_matter::tlv::Nullable::none()),
+            Self::Operational(q) => q.rssi(),
+        }
+    }
+}
+
+impl<Q> thread_diag::ThreadDiag for WirelessNetCtl<'_, Q>
+where
+    Q: thread_diag::ThreadDiag,
+{
+    fn channel(&self) -> Result<Option<u16>, Error> {
+        match self {
+            Self::Commissioning(_) => Ok(None),
+            Self::Operational(q) => q.channel(),
+        }
+    }
+    fn routing_role(&self) -> Result<Option<thread_diag::RoutingRoleEnum>, Error> {
+        match self {
+            Self::Commissioning(_) => Ok(None),
+            Self::Operational(q) => q.routing_role(),
+        }
+    }
+    fn network_name(
+        &self,
+        f: &mut dyn FnMut(Option<&str>) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        match self {
+            Self::Commissioning(_) => f(None),
+            Self::Operational(q) => q.network_name(f),
+        }
+    }
+    fn pan_id(&self) -> Result<Option<u16>, Error> {
+        match self {
+            Self::Commissioning(_) => Ok(None),
+            Self::Operational(q) => q.pan_id(),
+        }
+    }
+    fn extended_pan_id(&self) -> Result<Option<u64>, Error> {
+        match self {
+            Self::Commissioning(_) => Ok(None),
+            Self::Operational(q) => q.extended_pan_id(),
+        }
+    }
+    fn mesh_local_prefix(
+        &self,
+        f: &mut dyn FnMut(Option<&[u8]>) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        match self {
+            Self::Commissioning(_) => f(None),
+            Self::Operational(q) => q.mesh_local_prefix(f),
+        }
+    }
+    fn neighbor_table(
+        &self,
+        f: &mut dyn FnMut(&thread_diag::NeighborTable) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        match self {
+            Self::Commissioning(_) => Ok(()),
+            Self::Operational(q) => q.neighbor_table(f),
+        }
+    }
+    fn route_table(
+        &self,
+        f: &mut dyn FnMut(&thread_diag::RouteTable) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        match self {
+            Self::Commissioning(_) => Ok(()),
+            Self::Operational(q) => q.route_table(f),
+        }
+    }
+    fn partition_id(&self) -> Result<Option<u32>, Error> {
+        match self {
+            Self::Commissioning(_) => Ok(None),
+            Self::Operational(q) => q.partition_id(),
+        }
+    }
+    fn weighting(&self) -> Result<Option<u16>, Error> {
+        match self {
+            Self::Commissioning(_) => Ok(None),
+            Self::Operational(q) => q.weighting(),
+        }
+    }
+    fn data_version(&self) -> Result<Option<u16>, Error> {
+        match self {
+            Self::Commissioning(_) => Ok(None),
+            Self::Operational(q) => q.data_version(),
+        }
+    }
+    fn stable_data_version(&self) -> Result<Option<u16>, Error> {
+        match self {
+            Self::Commissioning(_) => Ok(None),
+            Self::Operational(q) => q.stable_data_version(),
+        }
+    }
+    fn leader_router_id(&self) -> Result<Option<u8>, Error> {
+        match self {
+            Self::Commissioning(_) => Ok(None),
+            Self::Operational(q) => q.leader_router_id(),
+        }
+    }
+    fn ext_address(&self) -> Result<Option<u64>, Error> {
+        match self {
+            Self::Commissioning(_) => Ok(None),
+            Self::Operational(q) => q.ext_address(),
+        }
+    }
+    fn rloc_16(&self) -> Result<Option<u16>, Error> {
+        match self {
+            Self::Commissioning(_) => Ok(None),
+            Self::Operational(q) => q.rloc_16(),
+        }
+    }
+    fn security_policy(&self) -> Result<Option<thread_diag::SecurityPolicy>, Error> {
+        match self {
+            Self::Commissioning(_) => Ok(None),
+            Self::Operational(q) => q.security_policy(),
+        }
+    }
+    fn channel_page0_mask(
+        &self,
+        f: &mut dyn FnMut(Option<&[u8]>) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        match self {
+            Self::Commissioning(_) => f(None),
+            Self::Operational(q) => q.channel_page0_mask(f),
+        }
+    }
+    fn operational_dataset_components(
+        &self,
+        f: &mut dyn FnMut(Option<&thread_diag::OperationalDatasetComponents>) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        match self {
+            Self::Commissioning(_) => f(None),
+            Self::Operational(q) => q.operational_dataset_components(f),
+        }
+    }
+    fn active_network_faults_list(
+        &self,
+        f: &mut dyn FnMut(thread_diag::NetworkFaultEnum) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        match self {
+            Self::Commissioning(_) => Ok(()),
+            Self::Operational(q) => q.active_network_faults_list(f),
+        }
     }
 }
 
@@ -355,7 +678,7 @@ impl<S, N, C, M, G> PreexistingWireless<S, N, C, M, G> {
     }
 }
 
-pub(crate) struct MatterStackWirelessTask<'a, const B: usize, T, E, C, H, S, U>
+pub(crate) struct MatterStackWirelessTask<'a, const B: usize, T, E, C, H, S, U, Q>
 where
     T: WirelessNetwork,
     E: Embedding,
@@ -365,4 +688,9 @@ where
     handler: H,
     kv: S,
     user_task: U,
+    // The operational net-ctl type. Phantom-only: it makes the commissioning and
+    // operational phases name the SAME `WirelessNetCtl<Q>` chain type so the data
+    // model dispatch monomorphizes once. `fn() -> Q` keeps the task's auto-traits
+    // and variance independent of `Q`.
+    _net_ctl: PhantomData<fn() -> Q>,
 }
