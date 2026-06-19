@@ -26,25 +26,22 @@ use rs_matter::dm::clusters::basic_info::BasicInfoConfig;
 use rs_matter::dm::clusters::decl::basic_information::StartUp;
 use rs_matter::dm::clusters::dev_att::DeviceAttestation;
 use rs_matter::dm::clusters::gen_diag::NetifDiag;
-use rs_matter::dm::clusters::net_comm::NetworksAccess;
-#[allow(unused)]
-use rs_matter::dm::events::Events;
+use rs_matter::dm::clusters::net_comm::{NetCtl, Networks};
+use rs_matter::dm::clusters::wifi_diag::WirelessDiag;
 use rs_matter::dm::networks::NetChangeNotif;
-use rs_matter::dm::subscriptions::Subscriptions;
-use rs_matter::dm::{
-    AttrChangeNotifier, AttrId, ClusterId, DataModel, DataModelHandler, EndptId, IMBuffer,
-};
+use rs_matter::dm::{AttrChangeNotifier, AttrId, ClusterId, DataModel, EndptId};
 use rs_matter::error::{Error, ErrorCode};
+use rs_matter::im::{InteractionModel, InteractionModelState};
 use rs_matter::pairing::qr::QrTextType;
 use rs_matter::persist::{KvBlobStore, KvBlobStoreAccess};
 use rs_matter::respond::{DefaultResponder, ExchangeHandler, Responder};
 use rs_matter::sc::pase::MAX_COMM_WINDOW_TIMEOUT_SECS;
+use rs_matter::transport::exchange::MatterBuffers;
 use rs_matter::transport::network::{
     Address, ChainedNetwork, NetworkMulticast, NetworkReceive, NetworkSend, NoNetwork,
 };
 use rs_matter::utils::init::{init, Init};
 use rs_matter::utils::select::Coalesce;
-use rs_matter::utils::storage::pooled::PooledBuffers;
 use rs_matter::utils::sync::{DynBase, IfMutex};
 use rs_matter::{BasicCommData, Matter, MATTER_PORT};
 
@@ -52,7 +49,6 @@ use crate::bump::Bump;
 use crate::mdns::Mdns;
 use crate::nal::NetStack;
 use crate::network::Network;
-use crate::persist::{MatterKvBlobStoreBuf, MatterKvBlobStoreBufInstance, MatterSharedKvBlobStore};
 
 #[cfg(feature = "std")]
 #[allow(unused_imports)]
@@ -73,7 +69,6 @@ pub mod matter;
 pub mod mdns;
 pub mod nal;
 pub mod network;
-pub mod persist;
 pub mod rand;
 pub mod udp;
 pub mod utils;
@@ -227,16 +222,24 @@ cfg_if! {
 
 const MAX_BUSY_RESPONDERS: usize = 2;
 
-pub(crate) type MatterStackDataModel<'a, C, H, S, N> = DataModel<
+pub type MatterStackInteractionModel<'a, C, H, K, RN, NC> = InteractionModel<
     'a,
+    C,
+    MatterBuffers<MAX_IM_BUFFERS>,
+    H,
+    K,
+    RN,
+    NC,
     MAX_SUBSCRIPTIONS,
     EVENTS_RINGBUF_SIZE,
-    C,
-    PooledBuffers<MAX_IM_BUFFERS, IMBuffer>,
-    H,
-    S,
-    N,
 >;
+
+/// The `InteractionModelState` specialization owned by `MatterStack`.
+///
+/// It owns the subscriptions table, the events queue and the `rs-matter`
+/// networks store as a single unit. The KV scratch buffer now lives in `Matter`.
+pub type MatterStackInteractionModelState<RN> =
+    InteractionModelState<RN, MAX_SUBSCRIPTIONS, EVENTS_RINGBUF_SIZE>;
 
 /// The `MatterStack` struct is the main entry point for the Matter stack.
 ///
@@ -246,10 +249,10 @@ where
     N: Network,
 {
     matter: Matter<'a>,
-    buffers: PooledBuffers<MAX_IM_BUFFERS, IMBuffer>,
-    subscriptions: Subscriptions<MAX_SUBSCRIPTIONS>,
-    events: Events<EVENTS_RINGBUF_SIZE>,
-    store_buf: MatterKvBlobStoreBuf,
+    buffers: MatterBuffers<MAX_IM_BUFFERS>,
+    /// The interaction-model state: subscriptions table, events queue, the
+    /// `rs-matter` networks store, and the KV scratch buffer, owned as one unit.
+    state: MatterStackInteractionModelState<N::Networks>,
     bump: Bump<B>,
     run_lock: IfMutex<()>,
     #[allow(unused)]
@@ -271,10 +274,8 @@ where
     ) -> Self {
         Self {
             matter: Matter::new(dev_det, dev_comm, dev_att, MATTER_PORT),
-            buffers: PooledBuffers::new(0),
-            subscriptions: Subscriptions::new(),
-            events: Events::new(),
-            store_buf: MatterKvBlobStoreBuf::new(),
+            buffers: MatterBuffers::new(),
+            state: MatterStackInteractionModelState::new(N::NETWORKS),
             bump: Bump::new(),
             run_lock: IfMutex::new(()),
             network: N::INIT,
@@ -295,10 +296,8 @@ where
                 dev_att,
                 MATTER_PORT,
             ),
-            buffers <- PooledBuffers::init(0),
-            subscriptions <- Subscriptions::init(),
-            events <- Events::init(),
-            store_buf <- MatterKvBlobStoreBuf::init(),
+            buffers <- MatterBuffers::init(),
+            state <- MatterStackInteractionModelState::init(N::init_networks()),
             bump <- Bump::init(),
             run_lock <- IfMutex::init(()),
             network <- N::init(),
@@ -324,23 +323,14 @@ where
         &self.network
     }
 
-    /// Create a new `MatterSharedKvBlobStore` instance, which is used to read and write blobs from the storage.
+    /// Create a new shared `KvBlobStore` instance, which is used to read and write blobs from the storage.
     ///
     /// The user needs to provide a `KvBlobStore` implementation, which is used to actually read and write the blobs from the storage.
-    pub fn create_shared_kv<S>(&self, kv: S) -> Result<MatterSharedKvBlobStore<'_, S>, Error>
-    where
-        S: KvBlobStore,
-    {
-        Ok(MatterSharedKvBlobStore::new(kv, self.kv_store_buf()?))
-    }
-
-    /// Get the buffer for the KV blob store, which is used to read and write blobs from the storage.
     ///
-    /// Return an error if the buffer is currently locked by another operation, which means that the caller should wait and try again later.
-    pub fn kv_store_buf(&self) -> Result<MatterKvBlobStoreBufInstance<'_>, Error> {
-        self.store_buf
-            .try_get()
-            .ok_or(ErrorCode::InvalidState.into())
+    /// # Arguments
+    /// - `store` - the raw [`KvBlobStore`] implementation to wrap
+    pub fn kv<'s, S: KvBlobStore + 's>(&'s self, store: S) -> impl KvBlobStoreAccess + 's {
+        self.matter().kv(store)
     }
 
     // /// User code hook to get the state of the netif passed to the
@@ -632,86 +622,90 @@ where
     }
 
     #[inline(always)]
-    fn dm<C, H, S, W>(
+    fn im<C, H, K, NC>(
         &self,
         crypto: C,
         handler: H,
-        kv: S,
-        networks: W,
-    ) -> MatterStackDataModel<'_, C, H, S, W>
+        kv: K,
+        net_ctl: NC,
+    ) -> MatterStackInteractionModel<'_, C, H, K, N::Networks, NC>
     where
         C: Crypto,
-        H: DataModelHandler,
-        S: KvBlobStoreAccess,
-        W: NetworksAccess,
+        H: DataModel,
+        K: KvBlobStoreAccess,
+        NC: NetCtl + WirelessDiag + NetChangeNotif,
     {
-        MatterStackDataModel::new(
+        MatterStackInteractionModel::new_with_net_ctl(
             self.matter(),
             crypto,
             &self.buffers,
-            &self.subscriptions,
-            &self.events,
             handler,
             kv,
-            networks,
+            net_ctl,
+            &self.state,
         )
     }
 
-    async fn run_dm<C, H, S, W>(
+    async fn run_im<C, H, K, RN, NC>(
         &self,
-        dm: &MatterStackDataModel<'_, C, H, S, W>,
+        im: &MatterStackInteractionModel<'_, C, H, K, RN, NC>,
     ) -> Result<(), Error>
     where
         C: Crypto,
-        H: DataModelHandler,
-        S: KvBlobStoreAccess,
-        W: NetworksAccess,
+        H: DataModel,
+        K: KvBlobStoreAccess,
+        RN: Networks,
+        NC: NetCtl + WirelessDiag + NetChangeNotif,
     {
         // TODO
         // Reset the Matter transport buffers and all sessions first
         // self.matter().reset_transport()?;
 
-        self.emit_startup_event(dm);
+        self.emit_startup_event(im);
 
-        let mut responder = pin!(self.run_responder(dm));
-        let mut dm_job = pin!(dm.run());
+        let mut responder = pin!(self.run_responder(im));
+        let mut im_job = pin!(im.run());
 
-        select(&mut responder, &mut dm_job).coalesce().await
+        select(&mut responder, &mut im_job).coalesce().await
     }
 
-    async fn run_dm_with_bump<C, H, S, W>(
+    async fn run_im_with_bump<C, H, K, RN, NC>(
         &self,
-        dm: &MatterStackDataModel<'_, C, H, S, W>,
+        im: &MatterStackInteractionModel<'_, C, H, K, RN, NC>,
     ) -> Result<(), Error>
     where
         C: Crypto,
-        H: DataModelHandler,
-        S: KvBlobStoreAccess,
-        W: NetworksAccess,
+        H: DataModel,
+        K: KvBlobStoreAccess,
+        RN: Networks,
+        NC: NetCtl + WirelessDiag + NetChangeNotif,
     {
         // TODO
         // Reset the Matter transport buffers and all sessions first
         // self.matter().reset_transport()?;
 
-        self.emit_startup_event(dm);
+        self.emit_startup_event(im);
 
-        let mut responder = pin_alloc!(self.bump, self.run_responder_with_bump(dm));
-        let mut dm_job = pin!(dm.run());
+        let mut responder = pin_alloc!(self.bump, self.run_responder_with_bump(im));
+        let mut im_job = pin!(im.run());
 
-        select(&mut responder, &mut dm_job).coalesce().await
+        select(&mut responder, &mut im_job).coalesce().await
     }
 
     /// Emit `BasicInformation::StartUp` on the root endpoint, as required
     /// by Matter 1.5.1 Core §11.1.6.1 (SHALL).
-    fn emit_startup_event<C, H, S, W>(&self, dm: &MatterStackDataModel<'_, C, H, S, W>)
-    where
+    fn emit_startup_event<C, H, K, RN, NC>(
+        &self,
+        im: &MatterStackInteractionModel<'_, C, H, K, RN, NC>,
+    ) where
         C: Crypto,
-        H: DataModelHandler,
-        S: KvBlobStoreAccess,
-        W: NetworksAccess,
+        H: DataModel,
+        K: KvBlobStoreAccess,
+        RN: Networks,
+        NC: NetCtl + WirelessDiag + NetChangeNotif,
     {
         let sw_ver = self.matter().dev_det().sw_ver;
-        match StartUp::emit_for(dm, 0, |b| b.software_version(sw_ver)?.end()) {
+        match StartUp::emit_for(im, 0, |b| b.software_version(sw_ver)?.end()) {
             Ok(event_number) => info!(
                 "BasicInformation::StartUp emitted (sw_ver={}, event_number={})",
                 sw_ver, event_number,
@@ -720,17 +714,18 @@ where
         }
     }
 
-    async fn run_responder<C, H, S, W>(
+    async fn run_responder<C, H, K, RN, NC>(
         &self,
-        dm: &MatterStackDataModel<'_, C, H, S, W>,
+        im: &MatterStackInteractionModel<'_, C, H, K, RN, NC>,
     ) -> Result<(), Error>
     where
         C: Crypto,
-        H: DataModelHandler,
-        S: KvBlobStoreAccess,
-        W: NetworksAccess,
+        H: DataModel,
+        K: KvBlobStoreAccess,
+        RN: Networks,
+        NC: NetCtl + WirelessDiag + NetChangeNotif,
     {
-        let responder = DefaultResponder::new(dm);
+        let responder = DefaultResponder::new(im);
 
         // Run the responder with up to MAX_RESPONDERS handlers (i.e. MAX_RESPONDERS exchanges can be handled simultenously)
         // Clients trying to open more exchanges than the ones currently running will get "I'm busy, please try again later"
@@ -739,17 +734,18 @@ where
         Ok(())
     }
 
-    async fn run_responder_with_bump<C, H, S, W>(
+    async fn run_responder_with_bump<C, H, K, RN, NC>(
         &self,
-        dm: &MatterStackDataModel<'_, C, H, S, W>,
+        im: &MatterStackInteractionModel<'_, C, H, K, RN, NC>,
     ) -> Result<(), Error>
     where
         C: Crypto,
-        H: DataModelHandler,
-        S: KvBlobStoreAccess,
-        W: NetworksAccess,
+        H: DataModel,
+        K: KvBlobStoreAccess,
+        RN: Networks,
+        NC: NetCtl + WirelessDiag + NetChangeNotif,
     {
-        let responder = DefaultResponder::new(dm);
+        let responder = DefaultResponder::new(im);
 
         let mut actual = pin_alloc!(
             self.bump,

@@ -1,19 +1,14 @@
-use core::borrow::BorrowMut;
 use core::marker::PhantomData;
 use core::pin::pin;
 
-use embassy_futures::select::{select, select3};
+use embassy_futures::select::select3;
 
 use rs_matter::crypto::Crypto;
 use rs_matter::dm::clusters::gen_diag::NetifDiag;
-use rs_matter::dm::clusters::net_comm::{
-    self, NetCtl, NetCtlError, NetworkType, SharedNetworks, WirelessCreds,
-};
+use rs_matter::dm::clusters::net_comm::{self, NetCtlError, NetworkType, WirelessCreds};
 use rs_matter::dm::clusters::wifi_diag::WirelessDiag;
 use rs_matter::dm::clusters::{thread_diag, wifi_diag};
-use rs_matter::dm::networks::wireless::{
-    NetCtlState, WirelessMgr, WirelessNetwork, WirelessNetworks, MAX_CREDS_SIZE,
-};
+use rs_matter::dm::networks::wireless::{NetCtlState, WirelessNetwork, WirelessNetworks};
 use rs_matter::dm::networks::NetChangeNotif;
 use rs_matter::error::Error;
 use rs_matter::pairing::DiscoveryCapabilities;
@@ -21,10 +16,10 @@ use rs_matter::persist::KvBlobStore;
 use rs_matter::transport::network::btp::{AdvData, Btp};
 use rs_matter::transport::network::NoNetwork;
 use rs_matter::utils::cell::RefCell;
-use rs_matter::utils::init::{init, zeroed, Init};
+use rs_matter::utils::init::{init, Init};
 use rs_matter::utils::select::Coalesce;
+use rs_matter::utils::sync::blocking;
 use rs_matter::utils::sync::DynBase;
-use rs_matter::utils::sync::{blocking, IfMutex};
 
 use crate::ble::GattPeripheral;
 use crate::mdns::Mdns;
@@ -63,10 +58,12 @@ where
     T: WirelessNetwork,
 {
     btp: Btp,
-    networks: SharedNetworks<WirelessNetworks<MAX_WIRELESS_NETWORKS, T>>,
     net_state: blocking::Mutex<RefCell<NetCtlState>>,
-    creds_buf: IfMutex<[u8; MAX_CREDS_SIZE]>,
     embedding: E,
+    // The wireless network type is no longer stored here (the networks store lives
+    // in the stack's `InteractionModelState`), but it still parameterizes the
+    // `Network::Networks` associated type, so keep it as a phantom marker.
+    _network: PhantomData<fn() -> T>,
 }
 
 impl<T, E> WirelessBle<T, E>
@@ -78,10 +75,9 @@ where
     pub const fn new() -> Self {
         Self {
             btp: Btp::new(),
-            networks: SharedNetworks::new(WirelessNetworks::new()),
             net_state: NetCtlState::new_with_mutex(),
-            creds_buf: IfMutex::new([0; MAX_CREDS_SIZE]),
             embedding: E::INIT,
+            _network: PhantomData,
         }
     }
 
@@ -89,16 +85,10 @@ where
     pub fn init() -> impl Init<Self> {
         init!(Self {
             btp <- Btp::init(),
-            networks <- SharedNetworks::init(WirelessNetworks::init()),
             net_state <- NetCtlState::init_with_mutex(),
-            creds_buf <- IfMutex::init(zeroed()),
             embedding <- E::init(),
+            _network: PhantomData,
         })
-    }
-
-    /// Return a reference to the networks storage.
-    pub fn networks(&self) -> &SharedNetworks<WirelessNetworks<MAX_WIRELESS_NETWORKS, T>> {
-        &self.networks
     }
 }
 
@@ -106,7 +96,7 @@ where
 /// both the (BLE) commissioning phase and the operational (Thread/Wifi) phase.
 ///
 /// This exists purely to avoid building two structurally-different Matter handler
-/// chains per device. `DataModel::handle` and every generated cluster handler
+/// chains per device. `InteractionModel::handle` and every generated cluster handler
 /// adaptor are monomorphized over the whole handler-chain tuple type; if the
 /// net-ctl slot has a different type per phase, the entire dispatch tree is
 /// compiled twice (~tens of KiB of duplicated `.text` on embedded targets).
@@ -449,8 +439,17 @@ where
     where
         Self: 'a;
 
+    // The wireless networks store, owned by the stack's `InteractionModelState`.
+    type Networks = WirelessNetworks<MAX_WIRELESS_NETWORKS, T>;
+
+    const NETWORKS: Self::Networks = WirelessNetworks::new();
+
     fn init() -> impl Init<Self> {
         WirelessBle::init()
+    }
+
+    fn init_networks() -> impl Init<Self::Networks> {
+        WirelessNetworks::init()
     }
 
     fn discovery_capabilities(&self) -> DiscoveryCapabilities {
@@ -468,47 +467,38 @@ where
     E: Embedding,
 {
     /// Reset the Matter instance to the factory defaults by removing all fabrics and basic info settings
-    pub async fn reset<S>(&mut self, mut kv: S) -> Result<(), Error>
+    pub async fn reset<S>(&mut self, store: S) -> Result<(), Error>
     where
         S: KvBlobStore,
     {
-        let mut buf = unwrap!(self.store_buf.try_get());
-        let buf = buf.borrow_mut();
+        let kv = self.matter.kv(store);
 
-        self.matter.reset_persist(&mut kv, buf).await?;
+        self.matter.reset_persist(&kv).await?;
 
-        // Reset the events counter so we don't carry a stale watermark
-        // across a factory reset (Matter Core spec R1.5.1, §7.14.1.1).
-        self.events.reset_persist(&mut kv, buf).await?;
+        // Reset the events counter and the wireless networks store so we don't
+        // carry stale state across a factory reset (Matter Core spec R1.5.1,
+        // §7.14.1.1 for the events watermark; the networks store holds the
+        // commissioned Wifi/Thread credentials).
+        self.state.reset_persist(&kv).await?;
 
-        self.network
-            .networks
-            .get_mut()
-            .get_mut()
-            .reset_persist(kv, buf)
-            .await
+        Ok(())
     }
 
     /// Load the persisted state from the provided `KvBlobStore` implementation.
-    pub async fn load<S>(&mut self, mut kv: S) -> Result<(), Error>
+    pub async fn load<S>(&mut self, store: S) -> Result<(), Error>
     where
         S: KvBlobStore,
     {
-        let mut buf = unwrap!(self.store_buf.try_get());
-        let buf = buf.borrow_mut();
+        let kv = self.matter.kv(store);
 
-        self.matter.load_persist(&mut kv, buf).await?;
+        self.matter.load_persist(&kv).await?;
 
-        // Restore the events counter so EventNumber stays monotonic across
-        // restarts (Matter Core spec R1.5.1, §7.14.1.1 SHALL).
-        self.events.load_persist(&mut kv, buf).await?;
+        // Restore the events counter (so EventNumber stays monotonic across
+        // restarts - Matter Core spec R1.5.1, §7.14.1.1 SHALL) and the wireless
+        // networks store, both in one call.
+        self.state.load_persist(&kv).await?;
 
-        self.network
-            .networks
-            .get_mut()
-            .get_mut()
-            .load_persist(kv, buf)
-            .await
+        Ok(())
     }
 
     /// Run the startup sequence of the stack, which includes loading the persisted state
@@ -531,13 +521,17 @@ where
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
-    async fn run_net_coex<C, S, N, D, Q, G>(
+    /// Run the concurrent (BLE + Wireless) commissioning transport.
+    ///
+    /// The operational wireless connection manager is no longer run here; it is
+    /// driven by the data model engine (`InteractionModel::run`), which was built
+    /// with the operational `net_ctl` and the stack's networks store. This method
+    /// therefore only runs the BTP coexistence transport.
+    async fn run_net_coex<C, S, N, D, G>(
         &self,
         crypto: C,
         net_stack: S,
         netif: N,
-        net_ctl: Q,
         mut mdns: D,
         mut gatt: G,
     ) -> Result<(), Error>
@@ -545,21 +539,11 @@ where
         C: Crypto,
         S: NetStack,
         N: NetifDiag + NetChangeNotif,
-        Q: NetCtl + WirelessDiag + NetChangeNotif,
         D: Mdns,
         G: GattPeripheral,
     {
-        let mut buf = self.network.creds_buf.lock().await;
-
-        let mut mgr = WirelessMgr::new(&self.network.networks, &net_ctl, &mut buf);
-
-        let mut net_task = pin_alloc!(
-            self.bump,
-            self.run_btp_coex(&crypto, &net_stack, &netif, &mut mdns, &mut gatt)
-        );
-        let mut mgr_task = pin_alloc!(self.bump, mgr.run());
-
-        select(&mut net_task, &mut mgr_task).coalesce().await
+        self.run_btp_coex(&crypto, &net_stack, &netif, &mut mdns, &mut gatt)
+            .await
     }
 
     async fn run_btp_coex<C, S, N, D, P>(
@@ -678,7 +662,7 @@ impl<S, N, C, M, G> PreexistingWireless<S, N, C, M, G> {
     }
 }
 
-pub(crate) struct MatterStackWirelessTask<'a, const B: usize, T, E, C, H, S, U, Q>
+pub(crate) struct MatterStackWirelessTask<'a, const B: usize, T, E, C, H, K, U, Q>
 where
     T: WirelessNetwork,
     E: Embedding,
@@ -686,11 +670,7 @@ where
     stack: &'a MatterStack<'a, B, WirelessBle<T, E>>,
     crypto: C,
     handler: H,
-    kv: S,
+    kv: K,
     user_task: U,
-    // The operational net-ctl type. Phantom-only: it makes the commissioning and
-    // operational phases name the SAME `WirelessNetCtl<Q>` chain type so the data
-    // model dispatch monomorphizes once. `fn() -> Q` keeps the task's auto-traits
-    // and variance independent of `Q`.
     _net_ctl: PhantomData<fn() -> Q>,
 }

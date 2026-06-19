@@ -95,11 +95,11 @@ fn main() -> Result<(), Error> {
         );
 
     // Create the KV BLOB store and load any previously saved state of `rs-matter`
-    let mut kv = DirKvBlobStore::new_default();
-    futures_lite::future::block_on(stack.startup(&crypto, &mut kv))?;
+    let mut store = DirKvBlobStore::new_default();
+    futures_lite::future::block_on(stack.startup(&crypto, &mut store))?;
 
     // Wrap the KV BLOB store as a shared reference, so that it can be used both by `rs-matter` and the user
-    let kv = stack.create_shared_kv(kv)?;
+    let kv = stack.matter().kv(store);
 
     // Run the Matter stack with our handler
     // Using `pin!` is completely optional, but reduces the size of the final future
@@ -121,7 +121,7 @@ fn main() -> Result<(), Error> {
         // Our `AsyncHandler` + `AsyncMetadata` impl
         (NODE, handler),
         // Will persist in `<tmp-dir>/rs-matter`
-        &kv,
+        kv,
         // No user task to run
         (),
     ));

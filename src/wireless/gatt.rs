@@ -30,8 +30,7 @@ where
 /// A trait for running a task within a context where the BLE peripheral is initialized and operable
 /// (e.g. the first part of a non-concurrent commissioning workflow)
 pub trait Gatt {
-    /// Setup the radio to operate in wireless (Wifi or Thread) mode
-    /// and run the given task
+    /// Setup the radio to operate in BLE mode and run the given task.
     async fn run<T>(&mut self, task: T) -> Result<(), Error>
     where
         T: GattTask;

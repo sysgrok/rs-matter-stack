@@ -1,4 +1,3 @@
-use core::borrow::BorrowMut;
 use core::future::Future;
 
 use embassy_futures::select::select4;
@@ -6,18 +5,19 @@ use embassy_futures::select::select4;
 use rs_matter::crypto::{Crypto, RngCore};
 use rs_matter::dm::clusters::gen_comm::CommPolicy;
 use rs_matter::dm::clusters::gen_diag::{GenDiag, NetifDiag};
-use rs_matter::dm::clusters::net_comm::DummyNetworkAccess;
+use rs_matter::dm::clusters::net_comm::{DummyNetworks, NetworkType};
 use rs_matter::dm::clusters::sw_diag::SwDiag;
 use rs_matter::dm::clusters::time_sync::TimeSync;
 use rs_matter::dm::endpoints::{eth_sys_handler, EthSysHandler, ROOT_ENDPOINT_ID};
+use rs_matter::dm::networks::wireless::NoopWirelessNetCtl;
 use rs_matter::dm::networks::NetChangeNotif;
-use rs_matter::dm::{ChainedHandler, DataModelHandler, Endpoint, EpClMatcher};
+use rs_matter::dm::{ChainedHandler, DataModel, Endpoint, EpClMatcher};
 use rs_matter::error::Error;
 use rs_matter::pairing::DiscoveryCapabilities;
 use rs_matter::persist::{KvBlobStore, KvBlobStoreAccess};
 use rs_matter::root_endpoint;
 use rs_matter::transport::network::NoNetwork;
-use rs_matter::utils::init::{init, Init};
+use rs_matter::utils::init::{init, init_from_closure, Init};
 use rs_matter::utils::select::Coalesce;
 
 use crate::mdns::Mdns;
@@ -53,10 +53,24 @@ where
     where
         E: 'a;
 
+    // Ethernet does not manage network credentials, so use the no-op networks store.
+    type Networks = DummyNetworks;
+
+    const NETWORKS: Self::Networks = DummyNetworks;
+
     fn init() -> impl Init<Self> {
         init!(Self {
             embedding <- E::init(),
         })
+    }
+
+    fn init_networks() -> impl Init<Self::Networks> {
+        unsafe {
+            init_from_closure(|slot: *mut DummyNetworks| {
+                slot.write(DummyNetworks);
+                Ok(())
+            })
+        }
     }
 
     fn discovery_capabilities(&self) -> DiscoveryCapabilities {
@@ -178,47 +192,47 @@ where
     }
 
     /// Reset the Matter instance to the factory defaults by removing all fabrics and basic info settings
-    pub async fn reset<S>(&mut self, mut kv: S) -> Result<(), Error>
+    pub async fn reset<S>(&mut self, store: S) -> Result<(), Error>
     where
         S: KvBlobStore,
     {
-        let mut buf = unwrap!(self.store_buf.try_get());
-        let buf = buf.borrow_mut();
+        let kv = self.matter.kv(store);
 
-        self.matter.reset_persist(&mut kv, buf).await?;
+        self.matter.reset_persist(&kv).await?;
 
-        // Reset the events counter so we don't carry a stale watermark
-        // across a factory reset (Matter Core spec R1.5.1, §7.14.1.1).
-        self.events.reset_persist(kv, buf).await?;
+        // Reset the events counter (and the - no-op for Ethernet - networks store)
+        // so we don't carry a stale watermark across a factory reset
+        // (Matter Core spec R1.5.1, §7.14.1.1).
+        self.state.reset_persist(&kv).await?;
 
         Ok(())
     }
 
     /// Load the persisted state from the provided `KvBlobStore` implementation.
-    pub async fn load<S>(&mut self, mut kv: S) -> Result<(), Error>
+    pub async fn load<S>(&mut self, store: S) -> Result<(), Error>
     where
         S: KvBlobStore,
     {
-        let mut buf = unwrap!(self.store_buf.try_get());
-        let buf = buf.borrow_mut();
+        let kv = self.matter.kv(store);
 
-        self.matter.load_persist(&mut kv, buf).await?;
+        self.matter.load_persist(&kv).await?;
 
-        // Restore the events counter so EventNumber stays monotonic across
-        // restarts (Matter Core spec R1.5.1, §7.14.1.1 SHALL).
-        self.events.load_persist(kv, buf).await?;
+        // Restore the events counter (and the - no-op for Ethernet - networks
+        // store) so EventNumber stays monotonic across restarts
+        // (Matter Core spec R1.5.1, §7.14.1.1 SHALL).
+        self.state.load_persist(&kv).await?;
 
         Ok(())
     }
 
     /// Run the startup sequence of the stack, which includes loading the persisted state
     /// and opening the basic communication window if the device is not commissioned yet.
-    pub async fn startup<C, S>(&mut self, crypto: C, kv: S) -> Result<(), Error>
+    pub async fn startup<C, S>(&mut self, crypto: C, store: S) -> Result<(), Error>
     where
         C: Crypto,
         S: KvBlobStore,
     {
-        self.load(kv).await?;
+        self.load(store).await?;
 
         if !self.is_commissioned() {
             info!("Device is not commissioned yet, opening commissioning window...");
@@ -242,14 +256,14 @@ where
     /// - `kv` - a user-provided `KvBlobStoreAccess` implementation for loading the persisted state of the stack
     /// - `user` - a user-provided future that will be polled only when the netif interface is up
     #[allow(clippy::too_many_arguments)]
-    pub fn run_preex<'t, U, N, M, C, H, S, X>(
+    pub fn run_preex<'t, U, N, M, C, H, K, X>(
         &'t self,
         net_stack: U,
         netif: N,
         mdns: M,
         crypto: C,
         handler: H,
-        kv: S,
+        kv: K,
         user: X,
     ) -> impl Future<Output = Result<(), Error>> + 't
     where
@@ -257,8 +271,8 @@ where
         N: NetifDiag + NetChangeNotif + 't,
         M: Mdns + 't,
         C: Crypto + 't,
-        H: DataModelHandler + 't,
-        S: KvBlobStoreAccess + 't,
+        H: DataModel + 't,
+        K: KvBlobStoreAccess + 't,
         X: UserTask + 't,
     {
         self.run(
@@ -278,19 +292,19 @@ where
     /// - `handler` - a user-provided DM handler implementation
     /// - `kv` - a user-provided `KvBlobStoreAccess` implementation for loading the persisted state of the stack
     /// - `user` - a user-provided future that will be polled only when the netif interface is up
-    pub async fn run<N, S, C, H, X>(
+    pub async fn run<N, C, H, K, X>(
         &self,
         mut ethernet: N,
         crypto: C,
         handler: H,
-        kv: S,
+        kv: K,
         user: X,
     ) -> Result<(), Error>
     where
         N: Ethernet,
         C: Crypto,
-        H: DataModelHandler,
-        S: KvBlobStoreAccess,
+        H: DataModel,
+        K: KvBlobStoreAccess,
         X: UserTask,
     {
         let _lock = self.run_lock.lock().await;
@@ -307,25 +321,25 @@ where
 
         let net_task = pin_alloc!(
             self.bump,
-            self.run_ethernet(&mut ethernet, crypto, handler, kv, user)
+            self.run_ethernet(&mut ethernet, crypto, handler, &kv, user)
         );
 
         net_task.await
     }
 
-    fn run_ethernet<'t, N, C, H, S, X>(
+    fn run_ethernet<'t, N, C, H, K, X>(
         &'t self,
         ethernet: &'t mut N,
         crypto: C,
         handler: H,
-        kv: S,
+        kv: K,
         user: X,
     ) -> impl Future<Output = Result<(), Error>> + 't
     where
         N: Ethernet + 't,
         C: Crypto + 't,
-        H: DataModelHandler + 't,
-        S: KvBlobStoreAccess + 't,
+        H: DataModel + 't,
+        K: KvBlobStoreAccess + 't,
         X: UserTask + 't,
     {
         Ethernet::run(
@@ -341,27 +355,27 @@ where
     }
 }
 
-struct MatterStackEthernetTask<'a, const B: usize, E, C, H, S, X>
+struct MatterStackEthernetTask<'a, const B: usize, E, C, H, K, X>
 where
     E: Embedding,
     C: Crypto,
-    H: DataModelHandler,
-    S: KvBlobStoreAccess,
+    H: DataModel,
+    K: KvBlobStoreAccess,
     X: UserTask,
 {
     stack: &'a MatterStack<'a, B, Eth<E>>,
     crypto: C,
     handler: H,
-    kv: S,
+    kv: K,
     user_task: X,
 }
 
-impl<const B: usize, E, C, H, S, X> EthernetTask for MatterStackEthernetTask<'_, B, E, C, H, S, X>
+impl<const B: usize, E, C, H, K, X> EthernetTask for MatterStackEthernetTask<'_, B, E, C, H, K, X>
 where
     E: Embedding,
     C: Crypto,
-    H: DataModelHandler,
-    S: KvBlobStoreAccess,
+    H: DataModel,
+    K: KvBlobStoreAccess,
     X: UserTask,
 {
     async fn run<N, I, M>(&mut self, net_stack: N, netif: I, mut mdns: M) -> Result<(), Error>
@@ -376,7 +390,7 @@ where
         // diag implementations can vary) covers every cluster on the
         // root endpoint; route anything on EP0 to it, and any other
         // endpoint to the user's handler. `&self.handler` doubles as
-        // the `Metadata` provider (`(M, H)` form for `DataModel::new`).
+        // the `Metadata` provider (`(M, H)` form for `InteractionModel::new`).
         let sys = self
             .stack
             .root_handler(&false, &(), &netif, &(), &(), self.crypto.weak_rand()?);
@@ -385,11 +399,13 @@ where
             sys,
             &self.handler,
         );
-        let dm = self.stack.dm(
+        // Ethernet does not manage networks, so use the inert wireless net-ctl;
+        // the engine's connection-manager branch then stays dormant.
+        let im = self.stack.im(
             &self.crypto,
             (&self.handler, combined),
             &self.kv,
-            DummyNetworkAccess,
+            NoopWirelessNetCtl::new(NetworkType::Ethernet),
         );
 
         let mut net_task = pin_alloc!(
@@ -409,11 +425,11 @@ where
                 .run_oper_netif_mdns(&self.crypto, &net_stack, &netif, &mut mdns)
         );
 
-        let mut dm_task = pin_alloc!(self.stack.bump, self.stack.run_dm_with_bump(&dm));
+        let mut im_task = pin_alloc!(self.stack.bump, self.stack.run_im_with_bump(&im));
 
         let mut user_task = pin_alloc!(self.stack.bump, self.user_task.run(&net_stack, &netif));
 
-        select4(&mut net_task, &mut mdns_task, &mut dm_task, &mut user_task)
+        select4(&mut net_task, &mut mdns_task, &mut im_task, &mut user_task)
             .coalesce()
             .await
     }

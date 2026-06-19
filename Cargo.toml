@@ -83,15 +83,6 @@ max-responders-3 = []
 max-responders-2 = []
 max-responders-1 = []
 
-# KV Blob store buffer size
-kv-blob-store-65536 = []
-kv-blob-store-32768 = []
-kv-blob-store-16384 = []
-kv-blob-store-8192 = []
-kv-blob-store-4096 = [] # default
-kv-blob-store-2048 = []
-kv-blob-store-1024 = []
-
 # Sizing / rs-matter
 
 # Number of fabrics
@@ -184,6 +175,15 @@ max-exchanges-per-session-6 = ["rs-matter/max-exchanges-per-session-6"]
 max-exchanges-per-session-5 = ["rs-matter/max-exchanges-per-session-5"] # default
 max-exchanges-per-session-4 = ["rs-matter/max-exchanges-per-session-4"]
 max-exchanges-per-session-3 = ["rs-matter/max-exchanges-per-session-3"]
+
+# KV Blob store buffer size (pass-through to rs-matter, which owns the buffer)
+kv-blob-store-65536 = ["rs-matter/kv-blob-store-65536"]
+kv-blob-store-32768 = ["rs-matter/kv-blob-store-32768"]
+kv-blob-store-16384 = ["rs-matter/kv-blob-store-16384"]
+kv-blob-store-8192 = ["rs-matter/kv-blob-store-8192"]
+kv-blob-store-4096 = ["rs-matter/kv-blob-store-4096"] # default
+kv-blob-store-2048 = ["rs-matter/kv-blob-store-2048"]
+kv-blob-store-1024 = ["rs-matter/kv-blob-store-1024"]
 
 # General
 log = ["dep:log", "rs-matter/log", "edge-mdns?/log"]

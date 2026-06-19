@@ -1,3 +1,4 @@
+use rs_matter::dm::clusters::net_comm::Networks as RsNetworks;
 use rs_matter::pairing::DiscoveryCapabilities;
 use rs_matter::utils::init::{init_from_closure, Init};
 
@@ -30,8 +31,23 @@ pub trait Network: Sealed {
     where
         Self: 'a;
 
+    /// The `rs-matter` networks store type owned by the stack's
+    /// `InteractionModelState` for this network kind.
+    ///
+    /// For Ethernet (and other transports where the Matter stack does not manage
+    /// network credentials) this is a no-op store; for the wireless (BLE+Wifi/Thread)
+    /// network it is a `WirelessNetworks` store.
+    type Networks: RsNetworks;
+
+    /// A const initializer for the `rs-matter` networks store (used by the
+    /// `const` `MatterStack::new` constructor).
+    const NETWORKS: Self::Networks;
+
     /// Return an in-place initializer for the network type.
     fn init() -> impl Init<Self>;
+
+    /// Return an in-place initializer for the `rs-matter` networks store.
+    fn init_networks() -> impl Init<Self::Networks>;
 
     /// Return the discovery capabilities of this network when commissioning the device.
     fn discovery_capabilities(&self) -> DiscoveryCapabilities;

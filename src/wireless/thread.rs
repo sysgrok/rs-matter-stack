@@ -13,11 +13,9 @@ use rs_matter::dm::clusters::sw_diag::SwDiag;
 use rs_matter::dm::clusters::thread_diag::ThreadDiag;
 use rs_matter::dm::clusters::time_sync::TimeSync;
 use rs_matter::dm::endpoints::{thread_sys_handler, ThreadSysHandler, ROOT_ENDPOINT_ID};
-use rs_matter::dm::networks::wireless::{
-    self, NetCtlWithStatusImpl, NoopWirelessNetCtl, WirelessMgr,
-};
+use rs_matter::dm::networks::wireless::{self, NetCtlWithStatusImpl, NoopWirelessNetCtl};
 use rs_matter::dm::networks::NetChangeNotif;
-use rs_matter::dm::{ChainedHandler, DataModelHandler, Endpoint, EpClMatcher};
+use rs_matter::dm::{ChainedHandler, DataModel, Endpoint, EpClMatcher};
 use rs_matter::error::Error;
 use rs_matter::persist::KvBlobStoreAccess;
 use rs_matter::root_endpoint;
@@ -53,7 +51,7 @@ where
     /// - `kv` - a user-provided `KvBlobStoreAccess` implementation
     /// - `user` - a user-provided future that will be polled only when the netif interface is up
     #[allow(clippy::too_many_arguments)]
-    pub fn run_preex<'t, U, N, Q, D, G, C, H, S, X>(
+    pub fn run_preex<'t, U, N, Q, D, G, C, H, K, X>(
         &'t self,
         net_stack: U,
         netif: N,
@@ -62,7 +60,7 @@ where
         gatt: G,
         crypto: C,
         handler: H,
-        kv: S,
+        kv: K,
         user: X,
     ) -> impl Future<Output = Result<(), Error>> + 't
     where
@@ -72,8 +70,8 @@ where
         D: Mdns + 't,
         G: GattPeripheral + 't,
         C: Crypto + 't,
-        H: DataModelHandler + 't,
-        S: KvBlobStoreAccess + 't,
+        H: DataModel + 't,
+        K: KvBlobStoreAccess + 't,
         X: UserTask + 't,
     {
         self.run_coex(
@@ -93,19 +91,19 @@ where
     /// - `handler` - a user-provided DM handler implementation
     /// - `kv` - a user-provided `KvBlobStoreAccess` implementation
     /// - `user` - a user-provided future that will be polled only when the netif interface is up
-    pub async fn run_coex<W, C, H, S, U>(
+    pub async fn run_coex<W, C, H, K, U>(
         &self,
         mut thread: W,
         crypto: C,
         handler: H,
-        kv: S,
+        kv: K,
         user: U,
     ) -> Result<(), Error>
     where
         W: ThreadCoex,
         C: Crypto,
-        H: DataModelHandler,
-        S: KvBlobStoreAccess,
+        H: DataModel,
+        K: KvBlobStoreAccess,
         U: UserTask,
     {
         let _lock = self.run_lock.lock().await;
@@ -136,19 +134,19 @@ where
     /// - `handler` - a user-provided DM handler implementation
     /// - `kv` - a user-provided `KvBlobStoreAccess` implementation
     /// - `user` - a user-provided future that will be polled only when the netif interface is up
-    pub async fn run<W, C, H, S, U>(
+    pub async fn run<W, C, H, K, U>(
         &self,
         thread: W,
         crypto: C,
         handler: H,
-        kv: S,
+        kv: K,
         user: U,
     ) -> Result<(), Error>
     where
         W: Thread + Gatt,
-        S: KvBlobStoreAccess,
+        K: KvBlobStoreAccess,
         C: Crypto,
-        H: DataModelHandler,
+        H: DataModel,
         U: UserTask,
     {
         let _lock = self.run_lock.lock().await;
@@ -171,56 +169,51 @@ where
         net_task.await
     }
 
-    fn run_thread_coex<'t, W, C, H, S, U>(
-        &'t self,
-        thread: &'t mut W,
+    async fn run_thread_coex<W, C, H, K, U>(
+        &self,
+        thread: &mut W,
         crypto: C,
         handler: H,
-        kv: S,
+        kv: K,
         user: U,
-    ) -> impl Future<Output = Result<(), Error>> + 't
+    ) -> Result<(), Error>
     where
-        W: ThreadCoex + 't,
-        C: Crypto + 't,
-        H: DataModelHandler + 't,
-        S: KvBlobStoreAccess + 't,
-        U: UserTask + 't,
+        W: ThreadCoex,
+        C: Crypto,
+        H: DataModel,
+        K: KvBlobStoreAccess,
+        U: UserTask,
     {
         // The coex task never builds a `WirelessNetCtl` chain via `Q`, so its
         // phantom net-ctl type is an irrelevant placeholder.
-        thread.run(MatterStackWirelessTask::<
-            '_,
-            B,
-            wireless::Thread,
-            E,
-            C,
-            H,
-            S,
-            U,
-            NoopWirelessNetCtl,
-        > {
-            stack: self,
-            crypto,
-            handler,
-            kv,
-            user_task: user,
-            _net_ctl: PhantomData,
-        })
+        // `&kv` is also lent to the driver so it can persist its own state.
+        thread
+            .run(
+                MatterStackWirelessTask::<'_, _, _, _, _, _, _, _, NoopWirelessNetCtl> {
+                    stack: self,
+                    crypto,
+                    handler,
+                    kv: &kv,
+                    user_task: user,
+                    _net_ctl: PhantomData,
+                },
+            )
+            .await
     }
 
-    async fn run_thread<W, C, H, S, U>(
+    async fn run_thread<W, C, H, K, U>(
         &self,
         mut thread: W,
         crypto: C,
         handler: H,
-        kv: S,
+        kv: K,
         mut user: U,
     ) -> Result<(), Error>
     where
         W: Thread + Gatt,
         C: Crypto,
-        H: DataModelHandler,
-        S: KvBlobStoreAccess,
+        H: DataModel,
+        K: KvBlobStoreAccess,
         U: UserTask,
     {
         loop {
@@ -229,17 +222,7 @@ where
             if !commissioned {
                 Gatt::run(
                     &mut thread,
-                    MatterStackWirelessTask::<
-                        '_,
-                        B,
-                        wireless::Thread,
-                        E,
-                        &C,
-                        &H,
-                        &S,
-                        &mut U,
-                        <W as Thread>::NetCtl<'_>,
-                    > {
+                    MatterStackWirelessTask::<'_, _, _, _, _, _, _, _, <W as Thread>::NetCtl<'_>> {
                         stack: self,
                         crypto: &crypto,
                         handler: &handler,
@@ -264,24 +247,14 @@ where
                     sys,
                     &handler,
                 );
-                let dm = self.dm(&crypto, (&handler, combined), &kv, &self.network().networks);
+                let im = self.im(&crypto, (&handler, combined), &kv, &net_ctl);
 
-                dm.close_comm_window()?;
+                im.close_comm_window()?;
             }
 
             Thread::run(
                 &mut thread,
-                MatterStackWirelessTask::<
-                    '_,
-                    B,
-                    wireless::Thread,
-                    E,
-                    &C,
-                    &H,
-                    &S,
-                    &mut U,
-                    <W as Thread>::NetCtl<'_>,
-                > {
+                MatterStackWirelessTask::<'_, _, _, _, _, _, _, _, <W as Thread>::NetCtl<'_>> {
                     stack: self,
                     crypto: &crypto,
                     handler: &handler,
@@ -382,7 +355,7 @@ pub trait Thread {
         Self: 'a;
 
     /// Setup the radio to operate in wireless (Wifi or Thread) mode
-    /// and run the given task
+    /// and run the given task.
     async fn run<T>(&mut self, task: T) -> Result<(), Error>
     where
         T: ThreadTask;
@@ -457,7 +430,7 @@ where
 /// of this trait.
 pub trait ThreadCoex {
     /// Setup the radio to operate in wireless coexist mode (Wifi or Thread + BLE)
-    /// and run the given task
+    /// and run the given task.
     async fn run<T>(&mut self, task: T) -> Result<(), Error>
     where
         T: ThreadCoexTask;
@@ -521,13 +494,13 @@ where
     }
 }
 
-impl<'a, const B: usize, E, C, H, S, X, Q> GattTask
-    for MatterStackWirelessTask<'a, B, wireless::Thread, E, C, H, S, X, Q>
+impl<'a, const B: usize, E, C, H, K, X, Q> GattTask
+    for MatterStackWirelessTask<'a, B, wireless::Thread, E, C, H, K, X, Q>
 where
     E: Embedding,
     C: Crypto,
-    H: DataModelHandler,
-    S: KvBlobStoreAccess,
+    H: DataModel,
+    K: KvBlobStoreAccess,
     Q: NetCtl + ThreadDiag + NetChangeNotif,
 {
     async fn run<P>(&mut self, peripheral: P) -> Result<(), Error>
@@ -553,28 +526,28 @@ where
             sys,
             &self.handler,
         );
-        let dm = self.stack.dm(
-            &self.crypto,
-            (&self.handler, combined),
-            &self.kv,
-            &self.stack.network().networks,
-        );
+        // The network store comes from the stack's `state`; the (commissioning)
+        // net-ctl is threaded into the engine, whose `run` keeps its connection
+        // manager dormant while not commissioned.
+        let im = self
+            .stack
+            .im(&self.crypto, (&self.handler, combined), &self.kv, &net_ctl);
 
         let mut btp_task = pin!(self.stack.run_btp(&self.crypto, peripheral));
 
-        let mut dm_task = pin!(self.stack.run_dm(&dm));
+        let mut im_task = pin!(self.stack.run_im(&im));
 
-        select(&mut btp_task, &mut dm_task).coalesce().await
+        select(&mut btp_task, &mut im_task).coalesce().await
     }
 }
 
-impl<'a, const B: usize, E, C, H, S, X, Z> ThreadTask
-    for MatterStackWirelessTask<'a, B, wireless::Thread, E, C, H, S, X, Z>
+impl<'a, const B: usize, E, C, H, K, X, Z> ThreadTask
+    for MatterStackWirelessTask<'a, B, wireless::Thread, E, C, H, K, X, Z>
 where
     E: Embedding,
     C: Crypto,
-    H: DataModelHandler,
-    S: KvBlobStoreAccess,
+    H: DataModel,
+    K: KvBlobStoreAccess,
     X: UserTask,
     Z: NetCtl + ThreadDiag + NetChangeNotif,
 {
@@ -592,10 +565,6 @@ where
         D: Mdns,
     {
         info!("Thread driver started");
-
-        let mut buf = self.stack.network.creds_buf.lock().await;
-
-        let mut mgr = WirelessMgr::new(&self.stack.network.networks, &net_ctl, &mut buf);
 
         let net_ctl_s = NetCtlWithStatusImpl::new(
             &self.stack.network.net_state,
@@ -616,14 +585,16 @@ where
             sys,
             &self.handler,
         );
-        let dm = self.stack.dm(
+        // The operational `net_ctl` is threaded into the engine, which now drives
+        // the maintenance `WirelessMgr` itself (against the stack's networks store).
+        let im = self.stack.im(
             &self.crypto,
             (&self.handler, combined),
             &self.kv,
-            &self.stack.network().networks,
+            &net_ctl_s,
         );
 
-        let stack = &mut self.stack;
+        let stack = &self.stack;
 
         let mut net_task = pin!(stack.run_oper_net(
             &self.crypto,
@@ -643,50 +614,45 @@ where
         // network cannot yet run, so the actual connect is deferred. Now that the
         // operational network is up, replay that connect *before* commissioning
         // completes - the commissioner re-establishes a CASE session over Thread
-        // and only then sends `CommissioningComplete` (which is what flips the
-        // network to "commissioned" and hands maintenance over to `WirelessMgr`).
+        // and only then sends `CommissioningComplete`. The engine's maintenance
+        // manager only connects *after* the device is commissioned, so this
+        // one-shot connect is still performed here.
         //
         // The target network is the exact one the commissioner selected: its ID
         // is remembered in `NetCtlState` by the commissioning-phase `connect`
         // wrapper. `is_prov_ready()` is true only in this pending non-concurrent
         // case (on a normal reboot of an already-commissioned device the state is
-        // empty, so we skip straight to the `WirelessMgr` maintenance loop).
+        // empty, so we skip the one-shot connect and let the engine's manager run).
         let deferred_connect_id = self.stack.network.net_state.lock(|state| {
             let state = state.borrow();
             state.is_prov_ready().then(|| state.network_id.clone())
         });
 
-        let mut mgr_task = pin!(async {
-            if let Some(network_id) = deferred_connect_id {
-                info!("Non-concurrent commissioning: performing the deferred connect");
-                mgr.connect_once(&network_id).await?;
-            }
+        if let Some(network_id) = deferred_connect_id {
+            info!("Non-concurrent commissioning: performing the deferred connect");
 
-            mgr.run().await
-        });
+            // The engine owns the networks + net-ctl; ask it to replay the
+            // deferred connect (no stack-owned `WirelessMgr`).
+            im.connect_once(&network_id).await?;
+        }
 
-        let mut dm_task = pin!(self.stack.run_dm(&dm));
+        let mut im_task = pin!(self.stack.run_im(&im));
 
         let mut user_task = pin!(self.user_task.run(&net_stack, &netif));
 
-        select4(
-            &mut net_task,
-            &mut mdns_task,
-            &mut mgr_task,
-            select(&mut dm_task, &mut user_task).coalesce(),
-        )
-        .coalesce()
-        .await
+        select4(&mut net_task, &mut mdns_task, &mut im_task, &mut user_task)
+            .coalesce()
+            .await
     }
 }
 
-impl<'a, const B: usize, E, C, H, S, X, Z> ThreadCoexTask
-    for MatterStackWirelessTask<'a, B, wireless::Thread, E, C, H, S, X, Z>
+impl<'a, const B: usize, E, C, H, K, X, Z> ThreadCoexTask
+    for MatterStackWirelessTask<'a, B, wireless::Thread, E, C, H, K, X, Z>
 where
     E: Embedding,
     C: Crypto,
-    H: DataModelHandler,
-    S: KvBlobStoreAccess,
+    H: DataModel,
+    K: KvBlobStoreAccess,
     X: UserTask,
     Z: NetCtl + ThreadDiag + NetChangeNotif,
 {
@@ -726,33 +692,29 @@ where
             sys,
             &self.handler,
         );
-        let dm = self.stack.dm(
+        // The operational `net_ctl` is threaded into the engine, which drives the
+        // maintenance `WirelessMgr` itself; `run_net_coex` only runs the BTP coex
+        // transport now.
+        let im = self.stack.im(
             &self.crypto,
             (&self.handler, combined),
             &self.kv,
-            &self.stack.network().networks,
+            &net_ctl_s,
         );
 
-        let stack = &mut self.stack;
+        let stack = &self.stack;
         let bump = &stack.bump;
 
         let mut net_task = pin_alloc!(
             bump,
-            stack.run_net_coex(
-                &self.crypto,
-                &net_stack,
-                &netif,
-                &net_ctl,
-                &mut mdns,
-                &mut gatt
-            )
+            stack.run_net_coex(&self.crypto, &net_stack, &netif, &mut mdns, &mut gatt)
         );
 
-        let mut dm_task = pin_alloc!(bump, self.stack.run_dm_with_bump(&dm));
+        let mut im_task = pin_alloc!(bump, self.stack.run_im_with_bump(&im));
 
         let mut user_task = pin_alloc!(bump, self.user_task.run(&net_stack, &netif));
 
-        select3(&mut net_task, &mut dm_task, &mut user_task)
+        select3(&mut net_task, &mut im_task, &mut user_task)
             .coalesce()
             .await
     }
