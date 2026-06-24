@@ -16,9 +16,10 @@ rust-version = "1.77"
 #rs-matter = { git = "https://github.com/project-chip/rs-matter" }
 rs-matter = { git = "https://github.com/sysgrok/rs-matter", branch = "next" }
 #rs-matter = { path = "../rs-matter/rs-matter" }
-#edge-nal = { git = "https://github.com/sysgrok/edge-net" }
-#edge-nal-std = { git = "https://github.com/sysgrok/edge-net" }
-#edge-mdns = { git = "https://github.com/sysgrok/edge-net" }
+# The new edge-net (with `UdpSplitMulticast` is not released yet.
+edge-nal = { git = "https://github.com/sysgrok/edge-net" }
+edge-nal-std = { git = "https://github.com/sysgrok/edge-net" }
+edge-mdns = { git = "https://github.com/sysgrok/edge-net" }
 
 [profile.dev]
 debug = true

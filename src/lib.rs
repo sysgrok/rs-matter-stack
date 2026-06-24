@@ -16,7 +16,7 @@ use core::pin::pin;
 
 use cfg_if::cfg_if;
 
-use edge_nal::{UdpBind, UdpSplit};
+use edge_nal::{UdpBind, UdpSplitMulticast};
 
 use embassy_futures::select::{select, select_slice};
 use embassy_time::Duration;
@@ -412,7 +412,7 @@ where
         &self,
         crypto: C,
         net_stack: U,
-        _net_interface: u32,
+        net_interface: u32,
         until: X,
         mut comm: Option<(R, S)>,
     ) -> Result<(), Error>
@@ -435,14 +435,20 @@ where
                 Ipv6Addr::UNSPECIFIED,
                 MATTER_PORT,
                 0,
-                0,
+                net_interface,
             )))
             .await
             .map_err(map_err)?;
 
-        let (recv, send) = socket.split();
+        let (recv, send, m4, m6) = socket.split_multicast();
 
-        let send = IfMutex::new(send);
+        let multicast = udp::Udp(udp::Multicast::new(
+            m4,
+            // rs-matter does not really use IPv4 multicast for Groups, so we can just use `Ipv4Addr::UNSPECIFIED` here.
+            Ipv4Addr::UNSPECIFIED,
+            m6,
+            net_interface,
+        ));
 
         let mut until_task = pin!(until);
 
@@ -451,23 +457,17 @@ where
 
             let mut netw_task = pin!(self.run_transport_net(
                 &crypto,
-                ChainedNetwork::new(Address::is_udp, udp::UdpSharedSend(&send), comm_send),
+                ChainedNetwork::new(Address::is_udp, udp::Udp(send), comm_send),
                 ChainedNetwork::new(Address::is_udp, udp::Udp(recv), comm_recv),
-                //TODO: Need to extend edge-nal's `UdpSplit` so support multicast
-                //ChainedNetwork::new(Address::is_udp, udp::UdpSharedMulticast(&send, net_interface), NoNetwork),
-                NoNetwork,
+                ChainedNetwork::new(Address::is_udp, multicast, NoNetwork),
             ));
 
             select(&mut netw_task, &mut until_task).coalesce().await
         } else {
             info!("Running operational network");
 
-            let mut netw_task = pin!(self.run_transport_net(
-                &crypto,
-                udp::UdpSharedSend(&send),
-                udp::Udp(recv),
-                NoNetwork
-            ));
+            let mut netw_task =
+                pin!(self.run_transport_net(&crypto, udp::Udp(send), udp::Udp(recv), multicast,));
 
             select(&mut netw_task, &mut until_task).coalesce().await
         }

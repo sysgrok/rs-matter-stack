@@ -63,6 +63,7 @@ pub mod noop {
     use edge_nal::{
         AddrType, Close, Dns, MulticastV4, MulticastV6, Readable, TcpAccept, TcpBind, TcpConnect,
         TcpShutdown, TcpSplit, UdpBind, UdpConnect, UdpReceive, UdpSend, UdpSplit,
+        UdpSplitMulticast,
     };
 
     /// A type that implements all `edge-nal` traits but does not support any operation
@@ -189,6 +190,22 @@ pub mod noop {
 
         fn split(&mut self) -> (Self::Send<'_>, Self::Receive<'_>) {
             panic!("UDP split not supported")
+        }
+    }
+
+    impl UdpSplitMulticast for NoopNet {
+        type MulticastV4<'a> = Self;
+        type MulticastV6<'a> = Self;
+
+        fn split_multicast(
+            &mut self,
+        ) -> (
+            Self::Receive<'_>,
+            Self::Send<'_>,
+            Self::MulticastV4<'_>,
+            Self::MulticastV6<'_>,
+        ) {
+            panic!("UDP split multicast not supported")
         }
     }
 

@@ -1,13 +1,12 @@
 //! UDP transport implementation for edge-nal
 
 use core::fmt::Debug;
-use core::net::IpAddr;
+use core::net::{IpAddr, Ipv4Addr};
 
-use edge_nal::{MulticastV6, Readable, UdpReceive, UdpSend};
+use edge_nal::{MulticastV4, MulticastV6, Readable, UdpReceive, UdpSend};
 
 use rs_matter::error::{Error, ErrorCode};
 use rs_matter::transport::network::{Address, NetworkMulticast, NetworkReceive, NetworkSend};
-use rs_matter::utils::sync::IfMutex;
 
 /// UDP transport implementation for edge-nal
 pub struct Udp<T>(pub T);
@@ -44,79 +43,64 @@ where
     }
 }
 
-impl<T> NetworkMulticast for Udp<(T, u32)>
+pub struct Multicast<M4, M6> {
+    m4: M4,
+    m4_network: Ipv4Addr,
+    m6: M6,
+    m6_interface: u32,
+}
+
+impl<M4, M6> Multicast<M4, M6>
 where
-    T: MulticastV6,
+    M4: MulticastV4,
+    M6: MulticastV6,
+{
+    pub const fn new(m4: M4, m4_network: Ipv4Addr, m6: M6, m6_interface: u32) -> Self {
+        Self {
+            m4,
+            m4_network,
+            m6,
+            m6_interface,
+        }
+    }
+}
+
+impl<M4, M6> NetworkMulticast for Udp<Multicast<M4, M6>>
+where
+    M4: MulticastV4,
+    M6: MulticastV6,
 {
     async fn join(&mut self, addr: IpAddr) -> Result<(), Error> {
         match addr {
-            IpAddr::V6(remote) => self.0 .0.join_v6(remote, self.0 .1).await.map_err(map_err),
-            IpAddr::V4(remote) => {
-                warn!("IPv4 multicast is not supported: {:?}", remote);
-                Ok(())
-            }
+            IpAddr::V4(remote) => self
+                .0
+                .m4
+                .join_v4(remote, self.0.m4_network)
+                .await
+                .map_err(map_err),
+            IpAddr::V6(remote) => self
+                .0
+                .m6
+                .join_v6(remote, self.0.m6_interface)
+                .await
+                .map_err(map_err),
         }
     }
 
     async fn leave(&mut self, addr: IpAddr) -> Result<(), Error> {
         match addr {
-            IpAddr::V6(remote) => self.0 .0.leave_v6(remote, self.0 .1).await.map_err(map_err),
-            IpAddr::V4(remote) => {
-                warn!("IPv4 multicast is not supported: {:?}", remote);
-                Ok(())
-            }
-        }
-    }
-}
-
-/// UDP send transport implementation for edge-nal where the send half of the socket is protected by a mutex
-pub struct UdpSharedSend<'a, T>(pub &'a IfMutex<T>);
-
-impl<T> NetworkSend for UdpSharedSend<'_, T>
-where
-    T: UdpSend,
-{
-    async fn send_to(&mut self, data: &[u8], addr: Address) -> Result<(), Error> {
-        let mut socket = self.0.lock().await;
-
-        if let Address::Udp(remote) = addr {
-            socket.send(remote, data).await.map_err(map_err)?;
-
-            Ok(())
-        } else {
-            Err(ErrorCode::NoNetworkInterface.into())
-        }
-    }
-}
-
-/// UDP multicast transport implementation for edge-nal where the multicast operations are protected by a mutex
-pub struct UdpSharedMulticast<'a, T>(pub &'a IfMutex<T>, pub u32);
-
-impl<T> NetworkMulticast for UdpSharedMulticast<'_, T>
-where
-    T: MulticastV6,
-{
-    async fn join(&mut self, addr: IpAddr) -> Result<(), Error> {
-        let mut socket = self.0.lock().await;
-
-        match addr {
-            IpAddr::V6(remote) => socket.join_v6(remote, self.1).await.map_err(map_err),
-            IpAddr::V4(remote) => {
-                warn!("IPv4 multicast is not supported: {:?}", remote);
-                Ok(())
-            }
-        }
-    }
-
-    async fn leave(&mut self, addr: IpAddr) -> Result<(), Error> {
-        let mut socket = self.0.lock().await;
-
-        match addr {
-            IpAddr::V6(remote) => socket.leave_v6(remote, self.1).await.map_err(map_err),
-            IpAddr::V4(remote) => {
-                warn!("IPv4 multicast is not supported: {:?}", remote);
-                Ok(())
-            }
+            IpAddr::V4(remote) => self
+                .0
+                .m4
+                .leave_v4(remote, self.0.m4_network)
+                .await
+                .map_err(map_err),
+            IpAddr::V6(remote) => self
+                .0
+                .m6
+                .leave_v6(remote, self.0.m6_interface)
+                .await
+                .map_err(map_err),
         }
     }
 }
