@@ -1,7 +1,7 @@
 use core::marker::PhantomData;
 use core::pin::pin;
 
-use embassy_futures::select::select3;
+use embassy_futures::select::{select, select3};
 
 use rs_matter::crypto::Crypto;
 use rs_matter::dm::clusters::gen_diag::NetifDiag;
@@ -14,7 +14,7 @@ use rs_matter::error::Error;
 use rs_matter::pairing::DiscoveryCapabilities;
 use rs_matter::persist::KvBlobStore;
 use rs_matter::transport::network::btp::{AdvData, Btp};
-use rs_matter::transport::network::NoNetwork;
+use rs_matter::transport::network::{MatterLocalService, NoNetwork};
 use rs_matter::utils::cell::RefCell;
 use rs_matter::utils::init::{init, Init};
 use rs_matter::utils::select::Coalesce;
@@ -552,7 +552,7 @@ where
         net_stack: S,
         netif: N,
         mut mdns: D,
-        mut peripheral: P,
+        peripheral: P,
     ) -> Result<(), Error>
     where
         C: Crypto,
@@ -572,7 +572,7 @@ where
 
         let mut btp_task = pin_alloc!(
             self.bump,
-            peripheral.run(&self.network.btp, "BT", &adv_data)
+            self.run_gatt_while_ble_commissionable(peripheral, &adv_data)
         );
 
         let mut net_task = pin_alloc!(
@@ -632,6 +632,90 @@ where
         select3(&mut btp_task, &mut net_task, &mut oper_net_act_task)
             .coalesce()
             .await
+    }
+
+    /// Run the GATT peripheral (and with it the BTP transport), but only for as long as the
+    /// device is actually commissionable over BLE. Never returns, unless the peripheral itself
+    /// fails.
+    async fn run_gatt_while_ble_commissionable<P>(
+        &self,
+        mut peripheral: P,
+        adv_data: &AdvData,
+    ) -> Result<(), Error>
+    where
+        P: GattPeripheral,
+    {
+        loop {
+            self.wait_comm_window_state(true).await?;
+
+            // TODO: Approximates `CommWindowState::is_open_on_all_transports`, which answers this
+            // exactly (a window carries its opener: `None` for one the device opened itself,
+            // `Some` for either of the two re-open commands). Switch to it - folding this check
+            // and the one above into a single `Matter::comm_window_state` read - once a
+            // `rs-matter` carrying it is released.
+            //
+            // Until then: sampled once, as the window opens, rather than tracked for as long as
+            // it stays open, because a fabric appears at `AddNOC` - in the middle of the very
+            // commissioning this peripheral is carrying - and tearing BLE down there would cut
+            // the commissioner off. That leaves the sample racing anything that could commission
+            // the device within one poll interval of the window opening, which no real
+            // commissioner can do: it has to discover the device and complete PASE first.
+            if self.is_commissioned() {
+                info!("Commissioning window opened over CASE; BLE peripheral not started");
+
+                self.wait_comm_window_state(false).await?;
+
+                continue;
+            }
+
+            info!("Commissioning window opened; BLE peripheral started");
+
+            {
+                let mut peripheral_task = pin!(peripheral.run(&self.network.btp, "BT", adv_data));
+                let mut closed_task = pin!(self.wait_comm_window_state(false));
+
+                select(&mut peripheral_task, &mut closed_task)
+                    .coalesce()
+                    .await?;
+            } // <- dropping the peripheral future here is what stops BLE
+
+            info!("Commissioning window closed; BLE peripheral stopped");
+        }
+    }
+
+    /// Resolve once "a commissioning window is open" equals `open`.
+    ///
+    /// Polled rather than driven by a notification: `rs-matter` signals a commissioning window
+    /// change only through the mDNS notification, and that is a single-slot `Notification`
+    /// already consumed by the mDNS task, so a second waiter would race it. Reacting a couple
+    /// of seconds late is of no consequence for what this drives.
+    async fn wait_comm_window_state(&self, open: bool) -> Result<(), Error> {
+        const POLL_INTERVAL_SECS: u64 = 2;
+
+        while self.is_comm_window_open()? != open {
+            embassy_time::Timer::after(embassy_time::Duration::from_secs(POLL_INTERVAL_SECS)).await;
+        }
+
+        Ok(())
+    }
+
+    /// Return `true` if a commissioning window (basic or enhanced) is currently open.
+    ///
+    /// Derived from the published mDNS services, as `rs-matter` advertises a commissionable
+    /// service for exactly as long as a commissioning window is open, and does not expose the
+    /// window state on its own. Note that [`MatterStack::is_commissioned`] is NOT a substitute:
+    /// it turns `true` on `AddNOC`, which is long before the commissioner is finished with the
+    /// BLE link.
+    fn is_comm_window_open(&self) -> Result<bool, Error> {
+        let mut open = false;
+
+        self.matter().mdns_services(|service| {
+            open |= matches!(service, MatterLocalService::Commissionable { .. });
+
+            Ok(())
+        })?;
+
+        Ok(open)
     }
 }
 
