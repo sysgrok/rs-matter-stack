@@ -9,6 +9,7 @@
 #![warn(clippy::large_stack_frames)]
 #![warn(clippy::large_types_passed_by_value)]
 
+use core::cell::Cell;
 use core::fmt::Debug;
 use core::future::Future;
 use core::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
@@ -23,10 +24,9 @@ use embassy_time::Duration;
 
 use rs_matter::crypto::Crypto;
 use rs_matter::dm::clusters::basic_info::BasicInfoConfig;
-use rs_matter::dm::clusters::decl::basic_information::StartUp;
 use rs_matter::dm::clusters::dev_att::DeviceAttestation;
 use rs_matter::dm::clusters::gen_diag::NetifDiag;
-use rs_matter::dm::clusters::net_comm::{NetCtl, Networks};
+use rs_matter::dm::clusters::net_comm::{NetCtl, NetCtlStatus, Networks};
 use rs_matter::dm::clusters::wifi_diag::WirelessDiag;
 use rs_matter::dm::networks::NetChangeNotif;
 use rs_matter::dm::{AttrChangeNotifier, AttrId, ClusterId, DataModel, EndptId};
@@ -42,6 +42,7 @@ use rs_matter::transport::network::{
 };
 use rs_matter::utils::init::{init, Init};
 use rs_matter::utils::select::Coalesce;
+use rs_matter::utils::sync::blocking::Mutex;
 use rs_matter::utils::sync::{DynBase, IfMutex};
 use rs_matter::{BasicCommData, Matter, MATTER_PORT};
 
@@ -230,6 +231,8 @@ pub type MatterStackInteractionModel<'a, C, H, K, RN, NC> = InteractionModel<
     K,
     RN,
     NC,
+    // The accessory role: inbound `ReportData` is disowned.
+    (),
     MAX_SUBSCRIPTIONS,
     EVENTS_RINGBUF_SIZE,
 >;
@@ -255,6 +258,21 @@ where
     state: MatterStackInteractionModelState<N::Networks>,
     bump: Bump<B>,
     run_lock: IfMutex<()>,
+    /// Whether the Interaction Model state (events watermark, networks store,
+    /// persisted subscriptions) has already been re-hydrated from the KV store.
+    ///
+    /// `InteractionModel::startup` cannot be driven from `MatterStack::startup`,
+    /// because it has to run on the very Interaction Model instance that is then
+    /// run: a resumed subscription borrows that instance's IM buffers, and
+    /// constructing an `InteractionModel` clears the subscriptions table. So the
+    /// stack hydrates from `run_im` instead.
+    ///
+    /// The stack however builds one Interaction Model *per phase* (BLE
+    /// commissioning, then operational), and only the first one may hydrate:
+    /// re-loading the networks store on the phase switch would drop the
+    /// credentials that non-concurrent commissioning has in memory but - with the
+    /// failsafe still armed - not yet persisted.
+    im_hydrated: Mutex<Cell<bool>>,
     #[allow(unused)]
     network: N,
     //netif_conf: Signal<Option<NetifConf>>,
@@ -278,6 +296,7 @@ where
             state: MatterStackInteractionModelState::new(N::NETWORKS),
             bump: Bump::new(),
             run_lock: IfMutex::new(()),
+            im_hydrated: Mutex::new(Cell::new(false)),
             network: N::INIT,
             //netif_conf: Signal::new(None),
         }
@@ -300,6 +319,7 @@ where
             state <- MatterStackInteractionModelState::init(N::init_networks()),
             bump <- Bump::init(),
             run_lock <- IfMutex::init(()),
+            im_hydrated: Mutex::new(Cell::new(false)),
             network <- N::init(),
             //netif_conf: Signal::new(None),
         })
@@ -368,11 +388,6 @@ where
     //         .wait(|netif_info| (netif_info.as_ref() != prev_netif_info).then(|| netif_info.clone()))
     //         .await
     // }
-
-    /// Return information whether the Matter instance is already commissioned.
-    pub fn is_commissioned(&self) -> bool {
-        self.matter().is_commissioned()
-    }
 
     /// Open the basic communication window, which allows commissioning tools to discover and commission the device.
     ///
@@ -633,7 +648,7 @@ where
         C: Crypto,
         H: DataModel,
         K: KvBlobStoreAccess,
-        NC: NetCtl + WirelessDiag + NetChangeNotif,
+        NC: NetCtl + NetCtlStatus + WirelessDiag + NetChangeNotif,
     {
         MatterStackInteractionModel::new_with_net_ctl(
             self.matter(),
@@ -655,13 +670,13 @@ where
         H: DataModel,
         K: KvBlobStoreAccess,
         RN: Networks,
-        NC: NetCtl + WirelessDiag + NetChangeNotif,
+        NC: NetCtl + NetCtlStatus + WirelessDiag + NetChangeNotif,
     {
         // TODO
         // Reset the Matter transport buffers and all sessions first
         // self.matter().reset_transport()?;
 
-        self.emit_startup_event(im);
+        self.startup_im(im).await?;
 
         let mut responder = pin!(self.run_responder(im));
         let mut im_job = pin!(im.run());
@@ -678,13 +693,13 @@ where
         H: DataModel,
         K: KvBlobStoreAccess,
         RN: Networks,
-        NC: NetCtl + WirelessDiag + NetChangeNotif,
+        NC: NetCtl + NetCtlStatus + WirelessDiag + NetChangeNotif,
     {
         // TODO
         // Reset the Matter transport buffers and all sessions first
         // self.matter().reset_transport()?;
 
-        self.emit_startup_event(im);
+        self.startup_im(im).await?;
 
         let mut responder = pin_alloc!(self.bump, self.run_responder_with_bump(im));
         let mut im_job = pin!(im.run());
@@ -692,26 +707,29 @@ where
         select(&mut responder, &mut im_job).coalesce().await
     }
 
-    /// Emit `BasicInformation::StartUp` on the root endpoint, as required
-    /// by Matter 1.5.1 Core §11.1.6.1 (SHALL).
-    fn emit_startup_event<C, H, K, RN, NC>(
+    /// Re-hydrate the Interaction Model state (events watermark, networks store,
+    /// persisted subscriptions) and deliver the `Startup` lifecycle op to the
+    /// cluster handlers - but only for the first Interaction Model instance that
+    /// this stack runs (see `im_hydrated`).
+    ///
+    /// `BasicInformation::StartUp` is emitted by `InteractionModel::run` itself,
+    /// once per process lifetime.
+    async fn startup_im<C, H, K, RN, NC>(
         &self,
         im: &MatterStackInteractionModel<'_, C, H, K, RN, NC>,
-    ) where
+    ) -> Result<(), Error>
+    where
         C: Crypto,
         H: DataModel,
         K: KvBlobStoreAccess,
         RN: Networks,
-        NC: NetCtl + WirelessDiag + NetChangeNotif,
+        NC: NetCtl + NetCtlStatus + WirelessDiag + NetChangeNotif,
     {
-        let sw_ver = self.matter().dev_det().sw_ver;
-        match StartUp::emit_for(im, 0, |b| b.software_version(sw_ver)?.end()) {
-            Ok(event_number) => info!(
-                "BasicInformation::StartUp emitted (sw_ver={}, event_number={})",
-                sw_ver, event_number,
-            ),
-            Err(e) => warn!("Failed to emit BasicInformation::StartUp: {:?}", e),
+        if self.im_hydrated.lock(|hydrated| hydrated.replace(true)) {
+            return Ok(());
         }
+
+        im.startup().await
     }
 
     async fn run_responder<C, H, K, RN, NC>(
@@ -723,7 +741,7 @@ where
         H: DataModel,
         K: KvBlobStoreAccess,
         RN: Networks,
-        NC: NetCtl + WirelessDiag + NetChangeNotif,
+        NC: NetCtl + NetCtlStatus + WirelessDiag + NetChangeNotif,
     {
         let responder = DefaultResponder::new(im);
 
@@ -743,7 +761,7 @@ where
         H: DataModel,
         K: KvBlobStoreAccess,
         RN: Networks,
-        NC: NetCtl + WirelessDiag + NetChangeNotif,
+        NC: NetCtl + NetCtlStatus + WirelessDiag + NetChangeNotif,
     {
         let responder = DefaultResponder::new(im);
 

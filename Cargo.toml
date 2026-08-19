@@ -1,6 +1,6 @@
 [package]
 name = "rs-matter-stack"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["ivmarkov <ivan.markov@gmail.com>"]
 edition = "2021"
 resolver = "2"
@@ -11,6 +11,10 @@ repository = "https://github.com/sysgrok/rs-matter-stack"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
 rust-version = "1.87"
+
+#[patch.crates-io]
+#rs-matter = { git = "https://github.com/project-chip/rs-matter" }
+#rs-matter = { path = "../rs-matter/rs-matter" }
 
 [profile.dev]
 debug = true
@@ -232,15 +236,15 @@ alloc = ["rs-matter/alloc"]
 # served by `MatterBuffers` to 1MB (from 1500 B).
 large-buffers = ["rs-matter/large-buffers"]
 # Multicast groups support.
-#groups = ["rs-matter/groups"]
+groups = ["rs-matter/groups"]
 # Persist accepted subscriptions and resume them across a reboot.
-#persistent-subscriptions = ["rs-matter/persistent-subscriptions"]
+persistent-subscriptions = ["rs-matter/persistent-subscriptions"]
 # CASE session resumption (Sigma2-Resume fast-path + its persisted cache).
 # When off, CASE always runs the full Sigma1/2/3 handshake, which is spec-compliant (resumption is optional) and drops the resume crypto + cache from the build.
-#case-resumption = ["rs-matter/case-resumption"]
+case-resumption = ["rs-matter/case-resumption"]
 # Never initiate a new CASE session: `Exchange::initiate` only reuses an existing session (else fails), so the linker drops the CASE initiator + mDNS resolver.
 # Suits a pure accessory that only reports over sessions its peers established.
-#case-responder-only = ["rs-matter/case-responder-only"]
+case-responder-only = ["rs-matter/case-responder-only"]
 
 # Enable all features necessary by the examples in this crate.
 examples = ["log", "os", "nix", "embassy-time-queue-utils/generic-queue-64", "zeroconf", "bluer"]
@@ -256,7 +260,7 @@ scopeguard = { version = "1", default-features = false }
 embassy-futures = "0.1"
 embassy-sync = "0.8"
 embassy-time = "0.5"
-rs-matter = { version = "0.2", default-features = false }
+rs-matter = { version = "0.3", default-features = false }
 edge-nal = "0.7"
 edge-nal-std = { version = "0.7", optional = true }
 edge-mdns = { version = "0.8", optional = true }
@@ -266,7 +270,7 @@ rand_chacha = { version = "0.9", default-features = false }
 
 [target.'cfg(all(unix, not(target_os = "espidf")))'.dependencies]
 bitflags = "2"
-nix = { version = "0.27", features = ["net"], optional = true }
+nix = { version = "0.30", features = ["net"], optional = true }
 
 [dev-dependencies]
 static_cell = "2.1"

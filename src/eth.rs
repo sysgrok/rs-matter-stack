@@ -7,7 +7,6 @@ use rs_matter::dm::clusters::gen_comm::CommPolicy;
 use rs_matter::dm::clusters::gen_diag::{GenDiag, NetifDiag};
 use rs_matter::dm::clusters::net_comm::{DummyNetworks, NetworkType};
 use rs_matter::dm::clusters::sw_diag::SwDiag;
-use rs_matter::dm::clusters::time_sync::TimeSync;
 use rs_matter::dm::endpoints::{eth_sys_handler, EthSysHandler, ROOT_ENDPOINT_ID};
 use rs_matter::dm::networks::wireless::NoopWirelessNetCtl;
 use rs_matter::dm::networks::NetChangeNotif;
@@ -184,57 +183,60 @@ where
         comm_policy: &'a dyn CommPolicy,
         gen_diag: &'a dyn GenDiag,
         netif_diag: &'a dyn NetifDiag,
-        time_sync: &'a dyn TimeSync,
         sw_diag: &'a dyn SwDiag,
         rand: impl RngCore + Copy,
     ) -> EthSysHandler<'a> {
-        eth_sys_handler(comm_policy, gen_diag, netif_diag, time_sync, sw_diag, rand)
+        eth_sys_handler(comm_policy, gen_diag, netif_diag, sw_diag, rand)
     }
 
     /// Reset the Matter instance to the factory defaults by removing all fabrics and basic info settings
-    pub async fn reset<S>(&mut self, store: S) -> Result<(), Error>
+    ///
+    /// `handler` is the same data model handler that is passed to `run`: the
+    /// Interaction Model broadcasts a `FactoryReset` lifecycle op to it, so
+    /// cluster handlers owning persisted state of their own can drop it too.
+    pub async fn reset<C, H, S>(&mut self, crypto: C, handler: H, store: S) -> Result<(), Error>
     where
+        C: Crypto,
+        H: DataModel,
         S: KvBlobStore,
     {
         let kv = self.matter.kv(store);
 
-        self.matter.reset_persist(&kv).await?;
+        self.matter.factory_reset(&kv)?;
 
         // Reset the events counter (and the - no-op for Ethernet - networks store)
         // so we don't carry a stale watermark across a factory reset
         // (Matter Core spec R1.5.1, §7.14.1.1).
-        self.state.reset_persist(&kv).await?;
-
-        Ok(())
+        self.im(
+            crypto,
+            handler,
+            &kv,
+            NoopWirelessNetCtl::new(NetworkType::Ethernet),
+        )
+        .factory_reset()
+        .await
     }
 
-    /// Load the persisted state from the provided `KvBlobStore` implementation.
-    pub async fn load<S>(&mut self, store: S) -> Result<(), Error>
-    where
-        S: KvBlobStore,
-    {
-        let kv = self.matter.kv(store);
-
-        self.matter.load_persist(&kv).await?;
-
-        // Restore the events counter (and the - no-op for Ethernet - networks
-        // store) so EventNumber stays monotonic across restarts
-        // (Matter Core spec R1.5.1, §7.14.1.1 SHALL).
-        self.state.load_persist(&kv).await?;
-
-        Ok(())
-    }
-
-    /// Run the startup sequence of the stack, which includes loading the persisted state
-    /// and opening the basic communication window if the device is not commissioned yet.
+    /// Run the startup sequence of the stack: re-hydrate the persisted state and
+    /// open the basic commissioning window if the device is not commissioned yet.
+    ///
+    /// This is the `Matter`-level half of the startup (fabrics, basic info, RTC,
+    /// sessions). The Interaction Model half - the events watermark, the networks
+    /// store and the persisted subscriptions - is re-hydrated by `run`, because
+    /// `InteractionModel::startup` has to run on the very Interaction Model
+    /// instance that is then run: a resumed subscription borrows that instance's
+    /// IM buffers, and constructing an `InteractionModel` clears the
+    /// subscriptions table.
     pub async fn startup<C, S>(&mut self, crypto: C, store: S) -> Result<(), Error>
     where
         C: Crypto,
         S: KvBlobStore,
     {
-        self.load(store).await?;
+        let kv = self.matter.kv(store);
 
-        if !self.is_commissioned() {
+        self.matter.startup(&kv)?;
+
+        if !self.matter().has_fabrics() {
             info!("Device is not commissioned yet, opening commissioning window...");
 
             self.open_basic_comm_window(crypto, &DummyAttrNotifier)?;
@@ -393,7 +395,7 @@ where
         // the `Metadata` provider (`(M, H)` form for `InteractionModel::new`).
         let sys = self
             .stack
-            .root_handler(&false, &(), &netif, &(), &(), self.crypto.weak_rand()?);
+            .root_handler(&false, &(), &netif, &(), self.crypto.weak_rand()?);
         let combined = ChainedHandler::new(
             EpClMatcher::new(Some(ROOT_ENDPOINT_ID), None),
             sys,

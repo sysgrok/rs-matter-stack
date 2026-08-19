@@ -1,20 +1,24 @@
 use core::marker::PhantomData;
 use core::pin::pin;
 
-use embassy_futures::select::{select, select3};
+use embassy_futures::select::{select, select3, select4};
 
 use rs_matter::crypto::Crypto;
 use rs_matter::dm::clusters::gen_diag::NetifDiag;
 use rs_matter::dm::clusters::net_comm::{self, NetCtlError, NetworkType, WirelessCreds};
 use rs_matter::dm::clusters::wifi_diag::WirelessDiag;
 use rs_matter::dm::clusters::{thread_diag, wifi_diag};
-use rs_matter::dm::networks::wireless::{NetCtlState, WirelessNetwork, WirelessNetworks};
+use rs_matter::dm::networks::wireless::{
+    NetCtlState, NoopWirelessNetCtl, WirelessNetwork, WirelessNetworks,
+};
 use rs_matter::dm::networks::NetChangeNotif;
+use rs_matter::dm::DataModel;
 use rs_matter::error::Error;
 use rs_matter::pairing::DiscoveryCapabilities;
 use rs_matter::persist::KvBlobStore;
+use rs_matter::sc::pase::CommWindowState;
 use rs_matter::transport::network::btp::{AdvData, Btp};
-use rs_matter::transport::network::{MatterLocalService, NoNetwork};
+use rs_matter::transport::network::NoNetwork;
 use rs_matter::utils::cell::RefCell;
 use rs_matter::utils::init::{init, Init};
 use rs_matter::utils::select::Coalesce;
@@ -467,50 +471,56 @@ where
     E: Embedding,
 {
     /// Reset the Matter instance to the factory defaults by removing all fabrics and basic info settings
-    pub async fn reset<S>(&mut self, store: S) -> Result<(), Error>
+    ///
+    /// `handler` is the same data model handler that is passed to `run`: the
+    /// Interaction Model broadcasts a `FactoryReset` lifecycle op to it, so
+    /// cluster handlers owning persisted state of their own can drop it too.
+    pub async fn reset<C, H, S>(&mut self, crypto: C, handler: H, store: S) -> Result<(), Error>
     where
+        C: Crypto,
+        H: DataModel,
         S: KvBlobStore,
     {
         let kv = self.matter.kv(store);
 
-        self.matter.reset_persist(&kv).await?;
+        self.matter.factory_reset(&kv)?;
 
         // Reset the events counter and the wireless networks store so we don't
         // carry stale state across a factory reset (Matter Core spec R1.5.1,
         // §7.14.1.1 for the events watermark; the networks store holds the
         // commissioned Wifi/Thread credentials).
-        self.state.reset_persist(&kv).await?;
-
-        Ok(())
+        // The net-ctl is inert here - a factory reset never drives the
+        // wireless connection manager.
+        self.im(
+            crypto,
+            handler,
+            &kv,
+            NoopWirelessNetCtl::new(NetworkType::Ethernet),
+        )
+        .factory_reset()
+        .await
     }
 
-    /// Load the persisted state from the provided `KvBlobStore` implementation.
-    pub async fn load<S>(&mut self, store: S) -> Result<(), Error>
-    where
-        S: KvBlobStore,
-    {
-        let kv = self.matter.kv(store);
-
-        self.matter.load_persist(&kv).await?;
-
-        // Restore the events counter (so EventNumber stays monotonic across
-        // restarts - Matter Core spec R1.5.1, §7.14.1.1 SHALL) and the wireless
-        // networks store, both in one call.
-        self.state.load_persist(&kv).await?;
-
-        Ok(())
-    }
-
-    /// Run the startup sequence of the stack, which includes loading the persisted state
-    /// and opening the basic communication window if the device is not commissioned yet.
-    pub async fn startup<C, S>(&mut self, crypto: C, kv: S) -> Result<(), Error>
+    /// Run the startup sequence of the stack: re-hydrate the persisted state and
+    /// open the basic communication window if the device is not commissioned yet.
+    ///
+    /// This is the `Matter`-level half of the startup (fabrics, basic info, RTC,
+    /// sessions). The Interaction Model half - the events watermark, the networks
+    /// store and the persisted subscriptions - is re-hydrated by `run`, because
+    /// `InteractionModel::startup` has to run on the very Interaction Model
+    /// instance that is then run: a resumed subscription borrows that instance's
+    /// IM buffers, and constructing an `InteractionModel` clears the
+    /// subscriptions table.
+    pub async fn startup<C, S>(&mut self, crypto: C, store: S) -> Result<(), Error>
     where
         C: Crypto,
         S: KvBlobStore,
     {
-        self.load(kv).await?;
+        let kv = self.matter.kv(store);
 
-        if !self.is_commissioned() {
+        self.matter.startup(&kv)?;
+
+        if !self.matter().has_fabrics() {
             info!("Device is not commissioned yet, opening commissioning window...");
 
             self.open_basic_comm_window(crypto, &DummyAttrNotifier)?;
@@ -617,6 +627,18 @@ where
 
         let mut net_task =
             pin!(self.run_transport_net(&crypto, &self.network.btp, &self.network.btp, NoNetwork));
+
+        // The window this phase is advertising can also simply go away - it expires, or an
+        // administrator revokes it - without the commissioner ever getting as far as handing
+        // over the network credentials. Then there is nothing left to advertise, and BLE
+        // should stop rather than keep the peripheral up for a window that no longer exists.
+        let mut comm_window_task = pin!(async {
+            self.wait_comm_window(|state| !state.is_open_on_all_transports())
+                .await;
+
+            Ok(())
+        });
+
         let mut oper_net_act_task = pin!(async {
             NetCtlState::wait_prov_ready(&self.network.net_state, &self.network.btp).await;
 
@@ -629,9 +651,14 @@ where
             Ok(())
         });
 
-        select3(&mut btp_task, &mut net_task, &mut oper_net_act_task)
-            .coalesce()
-            .await
+        select4(
+            &mut btp_task,
+            &mut net_task,
+            &mut oper_net_act_task,
+            &mut comm_window_task,
+        )
+        .coalesce()
+        .await
     }
 
     /// Run the GATT peripheral (and with it the BTP transport), but only for as long as the
@@ -646,24 +673,20 @@ where
         P: GattPeripheral,
     {
         loop {
-            self.wait_comm_window_state(true).await?;
-
-            // TODO: Approximates `CommWindowState::is_open_on_all_transports`, which answers this
-            // exactly (a window carries its opener: `None` for one the device opened itself,
-            // `Some` for either of the two re-open commands). Switch to it - folding this check
-            // and the one above into a single `Matter::comm_window_state` read - once a
-            // `rs-matter` carrying it is released.
+            // BLE carries a window the device opened for itself - initial commissioning.
+            // A window re-opened by an administrator over CASE (`opener: Some`) is advertised
+            // on the operational IP network alone, so the peripheral stays down for it.
             //
-            // Until then: sampled once, as the window opens, rather than tracked for as long as
-            // it stays open, because a fabric appears at `AddNOC` - in the middle of the very
-            // commissioning this peripheral is carrying - and tearing BLE down there would cut
-            // the commissioner off. That leaves the sample racing anything that could commission
-            // the device within one poll interval of the window opening, which no real
-            // commissioner can do: it has to discover the device and complete PASE first.
-            if self.is_commissioned() {
+            // The opener is part of the window state, so one read answers both "is a window
+            // open" and "is it ours". It also does not change while the window is open - in
+            // particular the fabric that appears at `AddNOC`, in the middle of the very
+            // commissioning this peripheral is carrying, leaves it `None`.
+            let state = self.wait_comm_window(CommWindowState::is_open).await;
+
+            if !state.is_open_on_all_transports() {
                 info!("Commissioning window opened over CASE; BLE peripheral not started");
 
-                self.wait_comm_window_state(false).await?;
+                self.wait_comm_window(|state| !state.is_open()).await;
 
                 continue;
             }
@@ -672,7 +695,10 @@ where
 
             {
                 let mut peripheral_task = pin!(peripheral.run(&self.network.btp, "BT", adv_data));
-                let mut closed_task = pin!(self.wait_comm_window_state(false));
+                let mut closed_task = pin!(async {
+                    self.wait_comm_window(|state| !state.is_open()).await;
+                    Ok(())
+                });
 
                 select(&mut peripheral_task, &mut closed_task)
                     .coalesce()
@@ -683,39 +709,65 @@ where
         }
     }
 
-    /// Resolve once "a commissioning window is open" equals `open`.
+    /// Resolve once a commissioning window that has to be advertised on every transport
+    /// *appears* - i.e. once the radio is needed for BLE again.
+    ///
+    /// A window that is already open on entry does not count. The non-concurrent BLE -> wireless
+    /// handover happens with the window still open - it is closed by `CommissioningComplete`,
+    /// which the commissioner sends over the operational network, after the handover - so
+    /// treating the current window as an event would bounce the radio straight back to BLE in
+    /// the middle of the commissioning it is there to finish. Hence: let the current window go
+    /// away first, and only then wait for the next one. When nothing is open on entry - every
+    /// case other than that handover - the first wait resolves on its first poll.
+    async fn wait_next_comm_window(&self) {
+        self.wait_comm_window(|state| !state.is_open_on_all_transports())
+            .await;
+        self.wait_comm_window(CommWindowState::is_open_on_all_transports)
+            .await;
+    }
+
+    /// Forget the outcome of the last `NetworkCommissioning` scan / connect.
+    ///
+    /// The BLE phase of non-concurrent commissioning ends when `NetCtlState` reports that the
+    /// commissioner has handed the network credentials over, and that verdict is sticky: nothing
+    /// clears it, it is only ever overwritten by the next scan / connect. Clearing it as the BLE
+    /// phase starts scopes it to the commissioning attempt that this window represents. Without
+    /// it, a device commissioned earlier in this same boot would leave a freshly entered BLE
+    /// phase again after one poll interval, on the strength of a verdict from the previous
+    /// commissioning.
+    fn reset_net_ctl_state(&self) {
+        self.network.net_state.lock(|state| {
+            let mut state = state.borrow_mut();
+
+            state.network_id.clear();
+            state.networking_status = None;
+            state.connect_error_value = None;
+        });
+    }
+
+    /// Resolve once `until` accepts the current commissioning window state, and return that
+    /// state - so a caller that needs more than the predicate (typically the window's opener)
+    /// does not have to read it a second time.
     ///
     /// Polled rather than driven by a notification: `rs-matter` signals a commissioning window
     /// change only through the mDNS notification, and that is a single-slot `Notification`
     /// already consumed by the mDNS task, so a second waiter would race it. Reacting a couple
     /// of seconds late is of no consequence for what this drives.
-    async fn wait_comm_window_state(&self, open: bool) -> Result<(), Error> {
+    async fn wait_comm_window<F>(&self, until: F) -> CommWindowState
+    where
+        F: Fn(&CommWindowState) -> bool,
+    {
         const POLL_INTERVAL_SECS: u64 = 2;
 
-        while self.is_comm_window_open()? != open {
+        loop {
+            let state = self.matter().comm_window_state();
+
+            if until(&state) {
+                break state;
+            }
+
             embassy_time::Timer::after(embassy_time::Duration::from_secs(POLL_INTERVAL_SECS)).await;
         }
-
-        Ok(())
-    }
-
-    /// Return `true` if a commissioning window (basic or enhanced) is currently open.
-    ///
-    /// Derived from the published mDNS services, as `rs-matter` advertises a commissionable
-    /// service for exactly as long as a commissioning window is open, and does not expose the
-    /// window state on its own. Note that [`MatterStack::is_commissioned`] is NOT a substitute:
-    /// it turns `true` on `AddNOC`, which is long before the commissioner is finished with the
-    /// BLE link.
-    fn is_comm_window_open(&self) -> Result<bool, Error> {
-        let mut open = false;
-
-        self.matter().mdns_services(|service| {
-            open |= matches!(service, MatterLocalService::Commissionable { .. });
-
-            Ok(())
-        })?;
-
-        Ok(open)
     }
 }
 
