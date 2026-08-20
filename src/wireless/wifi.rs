@@ -10,7 +10,6 @@ use rs_matter::dm::clusters::gen_diag::GenDiag;
 use rs_matter::dm::clusters::gen_diag::NetifDiag;
 use rs_matter::dm::clusters::net_comm::{NetCtl, NetCtlStatus, NetworkType};
 use rs_matter::dm::clusters::sw_diag::SwDiag;
-use rs_matter::dm::clusters::time_sync::TimeSync;
 use rs_matter::dm::clusters::wifi_diag::WifiDiag;
 use rs_matter::dm::endpoints::{wifi_sys_handler, WifiSysHandler, ROOT_ENDPOINT_ID};
 use rs_matter::dm::networks::wireless::{self, NetCtlWithStatusImpl, NoopWirelessNetCtl};
@@ -213,9 +212,18 @@ where
         U: UserTask,
     {
         loop {
-            let commissioned = self.is_commissioned();
+            // BLE carries a commissioning window that the device opened for itself; one that an
+            // administrator re-opened over CASE is advertised over the operational IP network
+            // alone. Deliberately not `has_fabrics`: a commissioned device that re-opens a basic
+            // window has to become reachable over BLE again, and an uncommissioned one whose
+            // window has expired has nothing left to advertise.
+            if self
+                .matter()
+                .comm_window_state()
+                .is_open_on_all_transports()
+            {
+                self.reset_net_ctl_state();
 
-            if !commissioned {
                 Gatt::run(
                     &mut wifi,
                     MatterStackWirelessTask::<'_, _, _, _, _, _, _, _, <W as Wifi>::NetCtl<'_>> {
@@ -228,24 +236,6 @@ where
                     },
                 )
                 .await?;
-            }
-
-            if commissioned {
-                let net_ctl = NetCtlWithStatusImpl::new(
-                    &self.network.net_state,
-                    WirelessNetCtl::<<W as Wifi>::NetCtl<'_>>::Commissioning(NetworkType::Wifi),
-                );
-
-                let sys =
-                    self.root_handler(&false, &(), &(), &net_ctl, &(), &(), crypto.weak_rand()?);
-                let combined = ChainedHandler::new(
-                    EpClMatcher::new(Some(ROOT_ENDPOINT_ID), None),
-                    sys,
-                    &handler,
-                );
-                let im = self.im(&crypto, (&handler, combined), &kv, &net_ctl);
-
-                im.close_comm_window()?;
             }
 
             Wifi::run(
@@ -280,7 +270,6 @@ where
         gen_diag: &'a dyn GenDiag,
         netif_diag: &'a dyn NetifDiag,
         net_ctl: &'a C,
-        time_sync: &'a dyn TimeSync,
         sw_diag: &'a dyn SwDiag,
         rand: impl RngCore + Copy,
     ) -> WifiSysHandler<'a, &'a C>
@@ -292,7 +281,6 @@ where
             gen_diag,
             netif_diag,
             net_ctl,
-            time_sync,
             sw_diag,
             net_ctl,
             rand,
@@ -508,15 +496,9 @@ where
             WirelessNetCtl::<Q>::Commissioning(NetworkType::Wifi),
         );
 
-        let sys = self.stack.root_handler(
-            &false,
-            &(),
-            &(),
-            &net_ctl,
-            &(),
-            &(),
-            self.crypto.weak_rand()?,
-        );
+        let sys =
+            self.stack
+                .root_handler(&false, &(), &(), &net_ctl, &(), self.crypto.weak_rand()?);
         let combined = ChainedHandler::new(
             EpClMatcher::new(Some(ROOT_ENDPOINT_ID), None),
             sys,
@@ -573,7 +555,6 @@ where
             &netif,
             &net_ctl_s,
             &(),
-            &(),
             self.crypto.weak_rand()?,
         );
         let combined = ChainedHandler::new(
@@ -627,7 +608,23 @@ where
 
         let mut user_task = pin!(self.user_task.run(&net_stack, &netif));
 
-        select4(&mut net_task, &mut mdns_task, &mut im_task, &mut user_task)
+        let mut oper_task =
+            pin!(select4(&mut net_task, &mut mdns_task, &mut im_task, &mut user_task).coalesce());
+
+        // Hand the radio back to BLE once a commissioning window that has to be advertised
+        // there appears. The window still open from the commissioning this phase is finishing
+        // is not one of them - non-concurrent commissioning completes over the operational
+        // network, and only then does the window close - so wait for it to go away first, and
+        // only then for the next one to open.
+        let mut comm_window_task = pin!(async {
+            self.stack.wait_next_comm_window().await;
+
+            info!("Commissioning window opened; handing the radio back to BLE");
+
+            Ok(())
+        });
+
+        select(&mut oper_task, &mut comm_window_task)
             .coalesce()
             .await
     }
@@ -670,7 +667,6 @@ where
             &(),
             &netif,
             &net_ctl_s,
-            &(),
             &(),
             self.crypto.weak_rand()?,
         );
