@@ -16,6 +16,8 @@ use log::info;
 
 use rs_matter_stack::eth::EthMatterStack;
 use rs_matter_stack::matter::crypto::{default_crypto, Crypto};
+#[cfg(feature = "icd")]
+use rs_matter_stack::matter::crypto::RngCore;
 use rs_matter_stack::matter::dm::clusters::app::on_off;
 use rs_matter_stack::matter::dm::clusters::app::on_off::test::TestOnOffDeviceLogic;
 use rs_matter_stack::matter::dm::clusters::app::on_off::OnOffHooks;
@@ -54,18 +56,38 @@ fn main() -> Result<(), Error> {
 
     info!("Starting...");
 
+    // The default crypto provider
+    let crypto = default_crypto(rand::thread_rng(), DAC_PRIVKEY);
+
+    let mut rand = crypto.weak_rand()?;
+
     // Initialize the Matter stack (can be done only once),
     // as we'll run it in this thread
+    //
+    // This example does not use ICD - see `light_icd.rs` for that - but when
+    // the `icd` feature happens to be enabled in the same build (e.g. a
+    // `cargo build --all-features`), `MatterStack::init` needs the extra
+    // `IcdModeConfig` + Check-In counter seed arguments too.
+    #[cfg(not(feature = "icd"))]
     let stack = MATTER_STACK.uninit().init_with(EthMatterStack::init(
         &TEST_DEV_DET,
         TEST_DEV_COMM,
         &TEST_DEV_ATT,
     ));
-
-    // The default crypto provider
-    let crypto = default_crypto(rand::thread_rng(), DAC_PRIVKEY);
-
-    let mut rand = crypto.weak_rand()?;
+    #[cfg(feature = "icd")]
+    let stack = MATTER_STACK.uninit().init_with(EthMatterStack::init(
+        &TEST_DEV_DET,
+        TEST_DEV_COMM,
+        &TEST_DEV_ATT,
+        rs_matter_stack::matter::dm::clusters::icd_mgmt::IcdModeConfig {
+            idle_mode_duration_s: 60,
+            active_mode_duration_ms: 1000,
+            active_mode_threshold_ms: 1000,
+            user_active_mode_trigger_hint: 0,
+            user_active_mode_trigger_instruction: "",
+        },
+        rand.next_u32(),
+    ));
 
     // Our "light" on-off cluster.
     // It will toggle the light state every 5 seconds

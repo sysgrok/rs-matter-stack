@@ -11,15 +11,23 @@ use rs_matter::dm::clusters::gen_diag::NetifDiag;
 use rs_matter::dm::clusters::net_comm::{NetCtl, NetCtlStatus, NetworkType};
 use rs_matter::dm::clusters::sw_diag::SwDiag;
 use rs_matter::dm::clusters::thread_diag::ThreadDiag;
-use rs_matter::dm::endpoints::{thread_sys_handler, ThreadSysHandler, ROOT_ENDPOINT_ID};
+use rs_matter::dm::endpoints::{thread_sys_handler, ROOT_ENDPOINT_ID};
+#[cfg(not(feature = "icd"))]
+use rs_matter::dm::endpoints::ThreadSysHandler;
 use rs_matter::dm::networks::wireless::{self, NetCtlWithStatusImpl, NoopWirelessNetCtl};
 use rs_matter::dm::networks::NetChangeNotif;
 use rs_matter::dm::{ChainedHandler, DataModel, Endpoint, EpClMatcher};
 use rs_matter::error::Error;
 use rs_matter::persist::KvBlobStoreAccess;
+#[cfg(not(feature = "icd"))]
 use rs_matter::root_endpoint;
 use rs_matter::transport::network::NoNetwork;
 use rs_matter::utils::select::Coalesce;
+
+#[cfg(feature = "icd")]
+use rs_matter::dm::clusters::icd_mgmt::{ClusterHandler as _, IcdMgmtHandler};
+#[cfg(feature = "icd")]
+use rs_matter::dm::{Async, AsyncHandler, Dataver};
 
 use crate::mdns::Mdns;
 use crate::nal::NetStack;
@@ -259,14 +267,33 @@ where
 
     /// Return a metadata for the root (Endpoint 0) of the Matter Node
     /// configured for BLE+Thread network.
+    #[cfg(not(feature = "icd"))]
     pub const fn root_endpoint() -> Endpoint<'static> {
         const ENDPOINT: Endpoint<'static> = root_endpoint!(thread);
 
         ENDPOINT
     }
 
+    /// Return a metadata for the root (Endpoint 0) of the Matter Node
+    /// configured for BLE+Thread network, with the ICD Management cluster
+    /// included.
+    #[cfg(feature = "icd")]
+    pub const fn root_endpoint() -> Endpoint<'static> {
+        const ENDPOINT: Endpoint<'static> = Endpoint {
+            id: ROOT_ENDPOINT_ID,
+            device_types: rs_matter::devices!(rs_matter::dm::devices::DEV_TYPE_ROOT_NODE),
+            clusters: rs_matter::clusters!(thread; IcdMgmtHandler::CLUSTER),
+            client_clusters: &[],
+            unique_id: None,
+            semantic_tags: &[],
+        };
+
+        ENDPOINT
+    }
+
     /// Return a handler for the root (Endpoint 0) of the Matter Node
     /// configured for BLE+Thread network.
+    #[cfg(not(feature = "icd"))]
     #[allow(clippy::too_many_arguments)]
     fn root_handler<'a, N>(
         &'a self,
@@ -288,6 +315,38 @@ where
             sw_diag,
             net_ctl,
             rand,
+        )
+    }
+
+    /// Return a handler for the root (Endpoint 0) of the Matter Node
+    /// configured for BLE+Thread network, with the ICD Management cluster
+    /// handler chained in.
+    #[cfg(feature = "icd")]
+    #[allow(clippy::too_many_arguments)]
+    fn root_handler<'a, N>(
+        &'a self,
+        comm_policy: &'a dyn CommPolicy,
+        gen_diag: &'a dyn GenDiag,
+        netif_diag: &'a dyn NetifDiag,
+        net_ctl: &'a N,
+        sw_diag: &'a dyn SwDiag,
+        mut rand: impl RngCore + Copy,
+    ) -> impl AsyncHandler + 'a
+    where
+        N: NetCtl + NetCtlStatus + ThreadDiag,
+    {
+        thread_sys_handler(
+            comm_policy,
+            gen_diag,
+            netif_diag,
+            net_ctl,
+            sw_diag,
+            net_ctl,
+            rand,
+        )
+        .chain(
+            EpClMatcher::new(Some(ROOT_ENDPOINT_ID), Some(IcdMgmtHandler::CLUSTER.id)),
+            Async(IcdMgmtHandler::new(Dataver::new_rand(&mut rand), self.icd()).adapt()),
         )
     }
 }

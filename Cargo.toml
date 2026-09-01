@@ -245,6 +245,12 @@ case-resumption = ["rs-matter/case-resumption"]
 # Never initiate a new CASE session: `Exchange::initiate` only reuses an existing session (else fails), so the linker drops the CASE initiator + mDNS resolver.
 # Suits a pure accessory that only reports over sessions its peers established.
 case-responder-only = ["rs-matter/case-responder-only"]
+# ICD (Intermittently Connected Device) support: wires the ICD Management cluster onto
+# the root endpoint (Endpoint 0) and has `MatterStack` own the shared `Icd` state plus
+# its persistence lifecycle (registrations + Check-In counter, loaded at startup and
+# wiped on factory reset). The app still decides *when* to send Check-Ins - it drives
+# `MatterStack::icd()` itself from its own sleep/wake loop.
+icd = []
 
 # Enable all features necessary by the examples in this crate.
 examples = ["log", "os", "nix", "embassy-time-queue-utils/generic-queue-64", "zeroconf", "bluer"]
@@ -289,3 +295,8 @@ required-features = ["examples"]
 name = "light"
 path = "examples/light.rs"
 required-features = ["examples"]
+
+[[example]]
+name = "light_icd"
+path = "examples/light_icd.rs"
+required-features = ["examples", "icd"]
