@@ -485,6 +485,19 @@ where
             self.icd.load_registrations(&mut store, buf)?;
             self.icd.load_counter(&mut store, ICD_COUNTER_EPOCH, buf)?;
 
+            // `CheckInCounter::new` (which `load_counter` falls back to on a
+            // first boot, and otherwise reconstructs from the persisted
+            // boundary) requires its returned boundary to be persisted
+            // immediately: a restart must always resume past every value
+            // this run might use. Without this, a run that never advances
+            // the counter a full `ICD_COUNTER_EPOCH` (the common case: a few
+            // Check-Ins per wake window, nowhere near the epoch size) never
+            // triggers `advance_counter`'s own persist, so the next boot
+            // reloads the same starting point and replays counter values
+            // the previous run already sent - which a compliant client must
+            // then reject.
+            self.icd.persist_counter(&mut store, buf)?;
+
             Ok::<_, Error>(())
         })?;
 
