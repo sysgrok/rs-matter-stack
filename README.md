@@ -37,6 +37,15 @@ You need to provide platform-specific implementations of the following traits fo
 - `NetCtl` - Wifi controller implementation when using Wifi connectivity (Thread has a built-in one in OpenThread).
   - `NoopWirelessNetCtl` is a no-op wireless implementation of a Wifi controller that is useful for testing. I.e. on Linux, one can use `PreexistingWireless` + `NoopWirelessNetCtl` together with `BluerGattPeripheral` and `UnixNetifs` to test the stack in wireless mode. For production embedded Linux use-cases, you'll have to provide a true `NetCtl` implementation, possibly based on WPA Supplicant, or NetworkManager (which **are** in the meantime both available from upstream `rs-matter`).
 
+## Endpoint 0
+
+The root endpoint (Endpoint 0) hosts the Matter system clusters. Their ownership is split between you and the stack:
+
+- **You** provide the clusters that do not depend on the operational network: Descriptor, Basic Information, Administrator Commissioning, Operational Credentials, Access Control, Group Key Management, Software Diagnostics and Time Synchronization. `MatterStack::root_handler(...)` returns a handler chain with all of them, which you chain into your handler under an Endpoint 0 matcher, next to your application clusters. Any extra Endpoint 0 cluster you need (Diagnostic Logs, ICD Management, OTA Requestor, ...) is chained the same way.
+- **The stack** chains the operational network clusters on top of your handler: Network Commissioning, General Commissioning, General Diagnostics and the Ethernet / Wifi / Thread Network Diagnostics cluster. Only the stack knows their inputs - the network controller, the network interface and the commissioning mode - and with non-concurrent commissioning these change when the device hands the radio over from BLE to Wifi / Thread.
+
+The metadata of the root endpoint is not split: `MatterStack::root_endpoint()` lists all clusters, and goes into your `Node` as-is.
+
 ## Embassy
 
 The [`rs-matter-embassy`](https://github.com/sysgrok/rs-matter-embassy) crate provides implementations for `KvBlobStore`, `NetifDiag`, `NetCtl`, `GattPeripheral` and others for the [`embassy`](https://github.com/embassy-rs/embassy) framework.
@@ -66,6 +75,7 @@ use core::pin::pin;
 
 use log::info;
 
+use rs_matter_stack::endpoints::FnMatcher;
 use rs_matter_stack::eth::EthMatterStack;
 use rs_matter_stack::matter::crypto::{default_crypto, Crypto};
 use rs_matter_stack::matter::dm::clusters::app::on_off;
@@ -78,8 +88,8 @@ use rs_matter_stack::matter::dm::devices::test::{TEST_DEV_ATT, TEST_DEV_COMM, TE
 use rs_matter_stack::matter::dm::devices::DEV_TYPE_ON_OFF_LIGHT;
 use rs_matter_stack::matter::dm::endpoints::ROOT_ENDPOINT_ID;
 use rs_matter_stack::matter::dm::networks::unix::UnixNetifs;
+use rs_matter_stack::matter::dm::EmptyHandler;
 use rs_matter_stack::matter::dm::{Async, Dataver, Endpoint, Node};
-use rs_matter_stack::matter::dm::{EmptyHandler, EpClMatcher};
 use rs_matter_stack::matter::error::Error;
 use rs_matter_stack::matter::persist::DirKvBlobStore;
 use rs_matter_stack::matter::transport::network::mdns::zeroconf::ZeroconfMdns;
@@ -137,20 +147,17 @@ fn main() -> Result<(), Error> {
         // Diagnostics) on top, because only it knows the network driver state.
         // Chain any extra Endpoint 0 clusters of your own the same way.
         .chain(
-            EpClMatcher::new(Some(ROOT_ENDPOINT_ID), None),
+            FnMatcher(|e, _| e == ROOT_ENDPOINT_ID),
             Async(EthMatterStack::<0, ()>::root_handler(&(), &mut rand)),
         )
         .chain(
-            EpClMatcher::new(
-                Some(LIGHT_ENDPOINT_ID),
-                Some(TestOnOffDeviceLogic::CLUSTER.id),
-            ),
+            FnMatcher(|e, c| e == LIGHT_ENDPOINT_ID && c == TestOnOffDeviceLogic::CLUSTER.id),
             on_off::HandlerAsyncAdaptor(&on_off),
         )
         // Each Endpoint needs a Descriptor cluster too
         // Just use the one that `rs-matter` provides out of the box
         .chain(
-            EpClMatcher::new(Some(LIGHT_ENDPOINT_ID), Some(desc::DescHandler::CLUSTER.id)),
+            FnMatcher(|e, c| e == LIGHT_ENDPOINT_ID && c == desc::DescHandler::CLUSTER.id),
             Async(desc::DescHandler::new(Dataver::new_rand(&mut rand)).adapt()),
         );
 

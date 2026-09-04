@@ -13,6 +13,7 @@ use core::pin::pin;
 use log::info;
 
 use rs_matter_stack::ble::BluerGattPeripheral;
+use rs_matter_stack::endpoints::FnMatcher;
 use rs_matter_stack::matter::crypto::{default_crypto, Crypto};
 use rs_matter_stack::matter::dm::clusters::app::on_off;
 use rs_matter_stack::matter::dm::clusters::app::on_off::test::TestOnOffDeviceLogic;
@@ -25,8 +26,8 @@ use rs_matter_stack::matter::dm::devices::DEV_TYPE_ON_OFF_LIGHT;
 use rs_matter_stack::matter::dm::endpoints::ROOT_ENDPOINT_ID;
 use rs_matter_stack::matter::dm::networks::unix::UnixNetifs;
 use rs_matter_stack::matter::dm::networks::wireless::NoopWirelessNetCtl;
+use rs_matter_stack::matter::dm::EmptyHandler;
 use rs_matter_stack::matter::dm::{Async, Dataver, Endpoint, Node};
-use rs_matter_stack::matter::dm::{EmptyHandler, EpClMatcher};
 use rs_matter_stack::matter::error::Error;
 use rs_matter_stack::matter::persist::DirKvBlobStore;
 use rs_matter_stack::matter::transport::network::mdns::zeroconf::ZeroconfMdns;
@@ -86,21 +87,18 @@ fn main() -> Result<(), Error> {
         // Diagnostics) on top, because only it knows the network driver state.
         // Chain any extra Endpoint 0 clusters of your own the same way.
         .chain(
-            EpClMatcher::new(Some(ROOT_ENDPOINT_ID), None),
+            FnMatcher(|e, _| e == ROOT_ENDPOINT_ID),
             Async(WifiMatterStack::<0, ()>::root_handler(&(), &mut rand)),
         )
         // Our on-off cluster, on Endpoint 1
         .chain(
-            EpClMatcher::new(
-                Some(LIGHT_ENDPOINT_ID),
-                Some(TestOnOffDeviceLogic::CLUSTER.id),
-            ),
+            FnMatcher(|e, c| e == LIGHT_ENDPOINT_ID && c == TestOnOffDeviceLogic::CLUSTER.id),
             on_off::HandlerAsyncAdaptor(&on_off),
         )
         // Each Endpoint needs a Descriptor cluster too
         // Just use the one that `rs-matter` provides out of the box
         .chain(
-            EpClMatcher::new(Some(LIGHT_ENDPOINT_ID), Some(DescHandler::CLUSTER.id)),
+            FnMatcher(|e, c| e == LIGHT_ENDPOINT_ID && c == DescHandler::CLUSTER.id),
             Async(DescHandler::new(Dataver::new_rand(&mut rand)).adapt()),
         );
 

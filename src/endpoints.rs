@@ -50,8 +50,7 @@ use rs_matter::dm::clusters::wifi_diag::{
 use rs_matter::dm::endpoints::ROOT_ENDPOINT_ID;
 use rs_matter::dm::networks::eth::EthNetCtl;
 use rs_matter::dm::{
-    Async, ChainedHandler, ClusterId, Dataver, EmptyHandler, EndptId, EpClMatcher, MatchContext,
-    Matcher,
+    Async, ChainedHandler, ClusterId, Dataver, EmptyHandler, EndptId, MatchContext, Matcher,
 };
 use rs_matter::handler_chain_type;
 
@@ -60,14 +59,14 @@ use rs_matter::handler_chain_type;
 /// This is a synchronous chain; wrap it in `Async` to chain it with
 /// asynchronous handlers.
 pub type RootHandler<'a> = handler_chain_type!(
-    EpClMatcher => desc::HandlerAdaptor<DescHandler<'a>>,
-    EpClMatcher => basic_info::HandlerAdaptor<BasicInfoHandler>,
-    EpClMatcher => adm_comm::HandlerAdaptor<AdminCommHandler>,
-    EpClMatcher => noc::HandlerAdaptor<NocHandler>,
-    EpClMatcher => acl::HandlerAdaptor<AclHandler>,
-    EpClMatcher => grp_key_mgmt::HandlerAdaptor<GrpKeyMgmtHandler>,
-    EpClMatcher => sw_diag::HandlerAdaptor<SwDiagHandler<'a>>,
-    EpClMatcher => time_sync::HandlerAdaptor<TimeSyncHandler<'a>>
+    FnMatcher => desc::HandlerAdaptor<DescHandler<'a>>,
+    FnMatcher => basic_info::HandlerAdaptor<BasicInfoHandler>,
+    FnMatcher => adm_comm::HandlerAdaptor<AdminCommHandler>,
+    FnMatcher => noc::HandlerAdaptor<NocHandler>,
+    FnMatcher => acl::HandlerAdaptor<AclHandler>,
+    FnMatcher => grp_key_mgmt::HandlerAdaptor<GrpKeyMgmtHandler>,
+    FnMatcher => sw_diag::HandlerAdaptor<SwDiagHandler<'a>>,
+    FnMatcher => time_sync::HandlerAdaptor<TimeSyncHandler<'a>>
 );
 
 /// A type alias for the handler chain returned by `eth_net_handler()`.
@@ -91,45 +90,43 @@ pub type ThreadNetHandler<'a, T, H> =
 /// single `Async` wrapper, so that the async-to-sync adaptation is
 /// monomorphized once rather than once per cluster.
 pub type NetHandler<'a, T, N, H> = handler_chain_type!(
-    EpClMatcher => net_comm::HandlerAsyncAdaptor<NetCommHandler<'a, T>>,
-    EpClsMatcher<3> => Async<handler_chain_type!(
-        EpClMatcher => N,
-        EpClMatcher => gen_diag::HandlerAdaptor<GenDiagHandler<'a>>,
-        EpClMatcher => gen_comm::HandlerAdaptor<GenCommHandler<'a>>
+    FnMatcher => net_comm::HandlerAsyncAdaptor<NetCommHandler<'a, T>>,
+    FnMatcher => Async<handler_chain_type!(
+        FnMatcher => gen_comm::HandlerAdaptor<GenCommHandler<'a>>,
+        FnMatcher => gen_diag::HandlerAdaptor<GenDiagHandler<'a>>,
+        FnMatcher => N
     )>
     | H
 );
 
-/// A matcher for an endpoint and a set of clusters on it.
+/// A matcher over a plain function of the endpoint and cluster IDs.
 ///
-/// Same semantics as `EpClMatcher`, except that the cluster is matched against
-/// a set rather than a single ID: a context without an endpoint or without a
-/// cluster matches, and so does any of the listed clusters on the endpoint.
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub struct EpClsMatcher<const N: usize> {
-    /// The endpoint to match, or `None` to match any endpoint.
-    pub endpoint_id: Option<EndptId>,
-    /// The clusters to match.
-    pub cluster_ids: [ClusterId; N],
-}
+/// A context without an endpoint or without a cluster (a global operation)
+/// matches; everything else is decided by the function. The function is a
+/// `fn` pointer rather than a closure type so that the matcher is nameable in
+/// `handler_chain_type!`; use non-capturing closures (constants are not
+/// captures) to build it:
+///
+/// ```ignore
+/// FnMatcher(|e, c| e == ROOT_ENDPOINT_ID && c == DescHandler::CLUSTER.id)
+/// ```
+///
+/// This is a newtype only because `Matcher` is not defined in this crate; once
+/// the matcher moves to `rs-matter`, it becomes a type alias for the bare
+/// function pointer and the wrapper at the call sites goes away.
+#[derive(Debug, Copy, Clone)]
+pub struct FnMatcher(pub fn(EndptId, ClusterId) -> bool);
 
-impl<const N: usize> EpClsMatcher<N> {
-    /// Create a new matcher for the given endpoint and set of clusters.
-    pub const fn new(endpoint_id: Option<EndptId>, cluster_ids: [ClusterId; N]) -> Self {
-        Self {
-            endpoint_id,
-            cluster_ids,
-        }
-    }
-}
-
-impl<const N: usize> Matcher for EpClsMatcher<N> {
+impl Matcher for FnMatcher {
     fn matches(&self, ctx: impl MatchContext) -> bool {
-        (self.endpoint_id.is_none() || ctx.endpt().is_none() || self.endpoint_id == ctx.endpt())
-            && ctx
-                .cluster()
-                .is_none_or(|cluster| self.cluster_ids.contains(&cluster))
+        let Some(endpt_id) = ctx.endpt() else {
+            return true;
+        };
+        let Some(cluster_id) = ctx.cluster() else {
+            return true;
+        };
+
+        (self.0)(endpt_id, cluster_id)
     }
 }
 
@@ -147,35 +144,35 @@ impl<const N: usize> Matcher for EpClsMatcher<N> {
 pub fn root_handler<'a, R: RngCore>(sw_diag: &'a dyn SwDiag, mut rand: R) -> RootHandler<'a> {
     EmptyHandler
         .chain(
-            EpClMatcher::new(Some(ROOT_ENDPOINT_ID), Some(TimeSyncHandler::CLUSTER.id)),
+            FnMatcher(|e, c| e == ROOT_ENDPOINT_ID && c == TimeSyncHandler::CLUSTER.id),
             TimeSyncHandler::new(Dataver::new_rand(&mut rand)).adapt(),
         )
         .chain(
-            EpClMatcher::new(Some(ROOT_ENDPOINT_ID), Some(SwDiagHandler::CLUSTER.id)),
+            FnMatcher(|e, c| e == ROOT_ENDPOINT_ID && c == SwDiagHandler::CLUSTER.id),
             SwDiagHandler::new(Dataver::new_rand(&mut rand), sw_diag).adapt(),
         )
         .chain(
-            EpClMatcher::new(Some(ROOT_ENDPOINT_ID), Some(GrpKeyMgmtHandler::CLUSTER.id)),
+            FnMatcher(|e, c| e == ROOT_ENDPOINT_ID && c == GrpKeyMgmtHandler::CLUSTER.id),
             GrpKeyMgmtHandler::new(Dataver::new_rand(&mut rand)).adapt(),
         )
         .chain(
-            EpClMatcher::new(Some(ROOT_ENDPOINT_ID), Some(AclHandler::CLUSTER.id)),
+            FnMatcher(|e, c| e == ROOT_ENDPOINT_ID && c == AclHandler::CLUSTER.id),
             AclHandler::new(Dataver::new_rand(&mut rand)).adapt(),
         )
         .chain(
-            EpClMatcher::new(Some(ROOT_ENDPOINT_ID), Some(NocHandler::CLUSTER.id)),
+            FnMatcher(|e, c| e == ROOT_ENDPOINT_ID && c == NocHandler::CLUSTER.id),
             NocHandler::new(Dataver::new_rand(&mut rand)).adapt(),
         )
         .chain(
-            EpClMatcher::new(Some(ROOT_ENDPOINT_ID), Some(AdminCommHandler::CLUSTER.id)),
+            FnMatcher(|e, c| e == ROOT_ENDPOINT_ID && c == AdminCommHandler::CLUSTER.id),
             AdminCommHandler::new(Dataver::new_rand(&mut rand)).adapt(),
         )
         .chain(
-            EpClMatcher::new(Some(ROOT_ENDPOINT_ID), Some(BasicInfoHandler::CLUSTER.id)),
+            FnMatcher(|e, c| e == ROOT_ENDPOINT_ID && c == BasicInfoHandler::CLUSTER.id),
             BasicInfoHandler::new(Dataver::new_rand(&mut rand)).adapt(),
         )
         .chain(
-            EpClMatcher::new(Some(ROOT_ENDPOINT_ID), Some(DescHandler::CLUSTER.id)),
+            FnMatcher(|e, c| e == ROOT_ENDPOINT_ID && c == DescHandler::CLUSTER.id),
             DescHandler::new(Dataver::new_rand(&mut rand)).adapt(),
         )
 }
@@ -203,7 +200,12 @@ pub fn eth_net_handler<'a, R: RngCore, H>(
         netif_diag,
         EthNetCtl::new_default(),
         &AlwaysConnected,
-        EthDiagHandler::CLUSTER.id,
+        FnMatcher(|e, c| {
+            e == ROOT_ENDPOINT_ID
+                && (c == GenCommHandler::CLUSTER.id
+                    || c == GenDiagHandler::CLUSTER.id
+                    || c == EthDiagHandler::CLUSTER.id)
+        }),
         EthDiagHandler::new(Dataver::new_rand(&mut rand)).adapt(),
         next,
         rand,
@@ -241,7 +243,12 @@ where
         netif_diag,
         net_ctl,
         wifi_diag,
-        WifiDiagHandler::CLUSTER.id,
+        FnMatcher(|e, c| {
+            e == ROOT_ENDPOINT_ID
+                && (c == GenCommHandler::CLUSTER.id
+                    || c == GenDiagHandler::CLUSTER.id
+                    || c == WifiDiagHandler::CLUSTER.id)
+        }),
         WifiDiagHandler::new(Dataver::new_rand(&mut rand), wifi_diag).adapt(),
         next,
         rand,
@@ -279,7 +286,12 @@ where
         netif_diag,
         net_ctl,
         thread_diag,
-        ThreadDiagHandler::CLUSTER.id,
+        FnMatcher(|e, c| {
+            e == ROOT_ENDPOINT_ID
+                && (c == GenCommHandler::CLUSTER.id
+                    || c == GenDiagHandler::CLUSTER.id
+                    || c == ThreadDiagHandler::CLUSTER.id)
+        }),
         ThreadDiagHandler::new(Dataver::new_rand(&mut rand), thread_diag).adapt(),
         next,
         rand,
@@ -291,6 +303,9 @@ where
 ///
 /// Use `eth_net_handler()`, `wifi_net_handler()` or `thread_net_handler()` instead to get the
 /// appropriate Network Diagnostic handler included in the handler.
+///
+/// `net_matcher` must match exactly General Commissioning, General Diagnostics
+/// and the `netw_diag` cluster on the root endpoint.
 #[allow(clippy::too_many_arguments)]
 fn net_handler<'a, R: RngCore, T, N, H>(
     comm_policy: &'a dyn CommPolicy,
@@ -298,7 +313,7 @@ fn net_handler<'a, R: RngCore, T, N, H>(
     netif_diag: &'a dyn NetifDiag,
     net_ctl: T,
     wireless_diag: &'a dyn WirelessDiag,
-    netw_diag_cluster_id: ClusterId,
+    net_matcher: FnMatcher,
     netw_diag: N,
     next: H,
     mut rand: R,
@@ -307,36 +322,27 @@ where
     T: NetCtl + NetCtlStatus,
 {
     ChainedHandler::new(
-        EpClsMatcher::new(
-            Some(ROOT_ENDPOINT_ID),
-            [
-                netw_diag_cluster_id,
-                GenDiagHandler::CLUSTER.id,
-                GenCommHandler::CLUSTER.id,
-            ],
-        ),
+        net_matcher,
         Async(
-            ChainedHandler::new(
-                EpClMatcher::new(Some(ROOT_ENDPOINT_ID), Some(GenCommHandler::CLUSTER.id)),
-                GenCommHandler::new(Dataver::new_rand(&mut rand), comm_policy).adapt(),
-                EmptyHandler,
-            )
-            .chain(
-                EpClMatcher::new(Some(ROOT_ENDPOINT_ID), Some(GenDiagHandler::CLUSTER.id)),
-                GenDiagHandler::new(Dataver::new_rand(&mut rand), gen_diag, netif_diag).adapt(),
-            )
-            .chain(
-                EpClMatcher::new(Some(ROOT_ENDPOINT_ID), Some(netw_diag_cluster_id)),
-                netw_diag,
-            ),
+            // The network diagnostics link is the bottom of the sub-chain:
+            // everything the group matcher lets through that the General
+            // Commissioning and General Diagnostics links above it did not
+            // claim is the network diagnostics cluster, so the group matcher
+            // is exact here too.
+            ChainedHandler::new(net_matcher, netw_diag, EmptyHandler)
+                .chain(
+                    FnMatcher(|e, c| e == ROOT_ENDPOINT_ID && c == GenDiagHandler::CLUSTER.id),
+                    GenDiagHandler::new(Dataver::new_rand(&mut rand), gen_diag, netif_diag).adapt(),
+                )
+                .chain(
+                    FnMatcher(|e, c| e == ROOT_ENDPOINT_ID && c == GenCommHandler::CLUSTER.id),
+                    GenCommHandler::new(Dataver::new_rand(&mut rand), comm_policy).adapt(),
+                ),
         ),
         next,
     )
     .chain(
-        EpClMatcher::new(
-            Some(ROOT_ENDPOINT_ID),
-            Some(NetCommHandler::<T>::CLUSTER.id),
-        ),
+        FnMatcher(|e, c| e == ROOT_ENDPOINT_ID && c == NetCommHandler::<T>::CLUSTER.id),
         NetCommHandler::new(Dataver::new_rand(&mut rand), net_ctl, wireless_diag).adapt(),
     )
 }
