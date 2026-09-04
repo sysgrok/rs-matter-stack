@@ -49,7 +49,10 @@ use rs_matter::dm::clusters::wifi_diag::{
 };
 use rs_matter::dm::endpoints::ROOT_ENDPOINT_ID;
 use rs_matter::dm::networks::eth::EthNetCtl;
-use rs_matter::dm::{Async, ChainedHandler, ClusterId, Dataver, EmptyHandler, EpClMatcher};
+use rs_matter::dm::{
+    Async, ChainedHandler, ClusterId, Dataver, EmptyHandler, EndptId, EpClMatcher, MatchContext,
+    Matcher,
+};
 use rs_matter::handler_chain_type;
 
 /// A type alias for the handler chain returned by `root_handler()`.
@@ -83,13 +86,52 @@ pub type ThreadNetHandler<'a, T, H> =
 ///
 /// `H` is the handler the operational network clusters are chained on top of;
 /// it receives everything the network clusters do not match.
+///
+/// The non-async clusters are kept in a single non-async sub-chain behind a
+/// single `Async` wrapper, so that the async-to-sync adaptation is
+/// monomorphized once rather than once per cluster.
 pub type NetHandler<'a, T, N, H> = handler_chain_type!(
     EpClMatcher => net_comm::HandlerAsyncAdaptor<NetCommHandler<'a, T>>,
-    EpClMatcher => Async<N>,
-    EpClMatcher => Async<gen_diag::HandlerAdaptor<GenDiagHandler<'a>>>,
-    EpClMatcher => Async<gen_comm::HandlerAdaptor<GenCommHandler<'a>>>
+    EpClsMatcher<3> => Async<handler_chain_type!(
+        EpClMatcher => N,
+        EpClMatcher => gen_diag::HandlerAdaptor<GenDiagHandler<'a>>,
+        EpClMatcher => gen_comm::HandlerAdaptor<GenCommHandler<'a>>
+    )>
     | H
 );
+
+/// A matcher for an endpoint and a set of clusters on it.
+///
+/// Same semantics as `EpClMatcher`, except that the cluster is matched against
+/// a set rather than a single ID: a context without an endpoint or without a
+/// cluster matches, and so does any of the listed clusters on the endpoint.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct EpClsMatcher<const N: usize> {
+    /// The endpoint to match, or `None` to match any endpoint.
+    pub endpoint_id: Option<EndptId>,
+    /// The clusters to match.
+    pub cluster_ids: [ClusterId; N],
+}
+
+impl<const N: usize> EpClsMatcher<N> {
+    /// Create a new matcher for the given endpoint and set of clusters.
+    pub const fn new(endpoint_id: Option<EndptId>, cluster_ids: [ClusterId; N]) -> Self {
+        Self {
+            endpoint_id,
+            cluster_ids,
+        }
+    }
+}
+
+impl<const N: usize> Matcher for EpClsMatcher<N> {
+    fn matches(&self, ctx: impl MatchContext) -> bool {
+        (self.endpoint_id.is_none() || ctx.endpt().is_none() || self.endpoint_id == ctx.endpt())
+            && ctx
+                .cluster()
+                .is_none_or(|cluster| self.cluster_ids.contains(&cluster))
+    }
+}
 
 /// Return the user-owned system handler for the root endpoint (Endpoint 0).
 ///
@@ -265,17 +307,30 @@ where
     T: NetCtl + NetCtlStatus,
 {
     ChainedHandler::new(
-        EpClMatcher::new(Some(ROOT_ENDPOINT_ID), Some(GenCommHandler::CLUSTER.id)),
-        Async(GenCommHandler::new(Dataver::new_rand(&mut rand), comm_policy).adapt()),
+        EpClsMatcher::new(
+            Some(ROOT_ENDPOINT_ID),
+            [
+                netw_diag_cluster_id,
+                GenDiagHandler::CLUSTER.id,
+                GenCommHandler::CLUSTER.id,
+            ],
+        ),
+        Async(
+            ChainedHandler::new(
+                EpClMatcher::new(Some(ROOT_ENDPOINT_ID), Some(GenCommHandler::CLUSTER.id)),
+                GenCommHandler::new(Dataver::new_rand(&mut rand), comm_policy).adapt(),
+                EmptyHandler,
+            )
+            .chain(
+                EpClMatcher::new(Some(ROOT_ENDPOINT_ID), Some(GenDiagHandler::CLUSTER.id)),
+                GenDiagHandler::new(Dataver::new_rand(&mut rand), gen_diag, netif_diag).adapt(),
+            )
+            .chain(
+                EpClMatcher::new(Some(ROOT_ENDPOINT_ID), Some(netw_diag_cluster_id)),
+                netw_diag,
+            ),
+        ),
         next,
-    )
-    .chain(
-        EpClMatcher::new(Some(ROOT_ENDPOINT_ID), Some(GenDiagHandler::CLUSTER.id)),
-        Async(GenDiagHandler::new(Dataver::new_rand(&mut rand), gen_diag, netif_diag).adapt()),
-    )
-    .chain(
-        EpClMatcher::new(Some(ROOT_ENDPOINT_ID), Some(netw_diag_cluster_id)),
-        Async(netw_diag),
     )
     .chain(
         EpClMatcher::new(
