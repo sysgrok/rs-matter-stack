@@ -2,15 +2,12 @@ use core::future::Future;
 
 use embassy_futures::select::select4;
 
-use rs_matter::crypto::{Crypto, RngCore};
-use rs_matter::dm::clusters::gen_comm::CommPolicy;
-use rs_matter::dm::clusters::gen_diag::{GenDiag, NetifDiag};
+use rs_matter::crypto::Crypto;
+use rs_matter::dm::clusters::gen_diag::NetifDiag;
 use rs_matter::dm::clusters::net_comm::{DummyNetworks, NetworkType};
-use rs_matter::dm::clusters::sw_diag::SwDiag;
-use rs_matter::dm::endpoints::{eth_sys_handler, EthSysHandler, ROOT_ENDPOINT_ID};
 use rs_matter::dm::networks::wireless::NoopWirelessNetCtl;
 use rs_matter::dm::networks::NetChangeNotif;
-use rs_matter::dm::{ChainedHandler, DataModel, Endpoint, EpClMatcher};
+use rs_matter::dm::{DataModel, Endpoint};
 use rs_matter::error::Error;
 use rs_matter::pairing::DiscoveryCapabilities;
 use rs_matter::persist::{KvBlobStore, KvBlobStoreAccess};
@@ -19,6 +16,7 @@ use rs_matter::transport::network::NoNetwork;
 use rs_matter::utils::init::{init, init_from_closure, Init};
 use rs_matter::utils::select::Coalesce;
 
+use crate::endpoints::eth_net_handler;
 use crate::mdns::Mdns;
 use crate::nal::NetStack;
 use crate::network::{Embedding, Network};
@@ -174,19 +172,6 @@ where
         const ENDPOINT: Endpoint<'static> = root_endpoint!(eth);
 
         ENDPOINT
-    }
-
-    /// Return a handler for the root (Endpoint 0) of the Matter Node
-    /// configured for Ethernet network.
-    fn root_handler<'a>(
-        &self,
-        comm_policy: &'a dyn CommPolicy,
-        gen_diag: &'a dyn GenDiag,
-        netif_diag: &'a dyn NetifDiag,
-        sw_diag: &'a dyn SwDiag,
-        rand: impl RngCore + Copy,
-    ) -> EthSysHandler<'a> {
-        eth_sys_handler(comm_policy, gen_diag, netif_diag, sw_diag, rand)
     }
 
     /// Reset the Matter instance to the factory defaults by removing all fabrics and basic info settings
@@ -388,19 +373,12 @@ where
     {
         info!("Ethernet driver started");
 
-        // The sys-handler chain (built per phase so per-phase `NetCtl` /
-        // diag implementations can vary) covers every cluster on the
-        // root endpoint; route anything on EP0 to it, and any other
-        // endpoint to the user's handler. `&self.handler` doubles as
+        // The operational network clusters of the root endpoint need the
+        // netif, which only exists here; chain them on top of the user's
+        // handler, which owns everything else. `&self.handler` doubles as
         // the `Metadata` provider (`(M, H)` form for `InteractionModel::new`).
-        let sys = self
-            .stack
-            .root_handler(&false, &(), &netif, &(), self.crypto.weak_rand()?);
-        let combined = ChainedHandler::new(
-            EpClMatcher::new(Some(ROOT_ENDPOINT_ID), None),
-            sys,
-            &self.handler,
-        );
+        let combined =
+            eth_net_handler(&false, &(), &netif, &self.handler, self.crypto.weak_rand()?);
         // Ethernet does not manage networks, so use the inert wireless net-ctl;
         // the engine's connection-manager branch then stays dormant.
         let im = self.stack.im(

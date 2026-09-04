@@ -22,11 +22,12 @@ use edge_nal::{UdpBind, UdpSplitMulticast};
 use embassy_futures::select::{select, select_slice};
 use embassy_time::Duration;
 
-use rs_matter::crypto::Crypto;
+use rs_matter::crypto::{Crypto, RngCore};
 use rs_matter::dm::clusters::basic_info::BasicInfoConfig;
 use rs_matter::dm::clusters::dev_att::DeviceAttestation;
 use rs_matter::dm::clusters::gen_diag::NetifDiag;
 use rs_matter::dm::clusters::net_comm::{NetCtl, NetCtlStatus, Networks};
+use rs_matter::dm::clusters::sw_diag::SwDiag;
 use rs_matter::dm::clusters::wifi_diag::WirelessDiag;
 use rs_matter::dm::networks::NetChangeNotif;
 use rs_matter::dm::{AttrChangeNotifier, AttrId, ClusterId, DataModel, EndptId};
@@ -47,6 +48,7 @@ use rs_matter::utils::sync::{DynBase, IfMutex};
 use rs_matter::{BasicCommData, Matter, MATTER_PORT};
 
 use crate::bump::Bump;
+use crate::endpoints::RootHandler;
 use crate::mdns::Mdns;
 use crate::nal::NetStack;
 use crate::network::Network;
@@ -65,6 +67,7 @@ pub(crate) mod fmt;
 
 pub mod ble;
 pub mod bump;
+pub mod endpoints;
 pub mod eth;
 pub mod matter;
 pub mod mdns;
@@ -282,6 +285,25 @@ impl<'a, const B: usize, N> MatterStack<'a, B, N>
 where
     N: Network,
 {
+    /// Return the user-owned system handler for the root endpoint (Endpoint 0).
+    ///
+    /// The returned chain services every root endpoint system cluster except the
+    /// operational network ones (Network Commissioning, the network-type diagnostics
+    /// cluster, General Diagnostics and General Commissioning), which the stack
+    /// chains on top of the user handler by itself, per network type and - with
+    /// non-concurrent commissioning - per commissioning phase.
+    ///
+    /// Chain the returned handler (wrapped in `Async`) with the application
+    /// clusters, and with any additional root endpoint clusters, and pass the
+    /// result as the `handler` argument of the `run*` methods.
+    ///
+    /// # Arguments
+    /// - `sw_diag` - the `SwDiag` implementation (pass `&()` for the no-op default)
+    /// - `rand` - a random number generator
+    pub fn root_handler<'r>(sw_diag: &'r dyn SwDiag, rand: impl RngCore) -> RootHandler<'r> {
+        crate::endpoints::root_handler(sw_diag, rand)
+    }
+
     /// Create a new `MatterStack` instance.
     #[allow(clippy::large_stack_frames)]
     #[inline(always)]

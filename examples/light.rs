@@ -22,6 +22,7 @@ use rs_matter_stack::matter::dm::clusters::net_comm::NetworkType;
 use rs_matter_stack::matter::dm::devices::test::DAC_PRIVKEY;
 use rs_matter_stack::matter::dm::devices::test::{TEST_DEV_ATT, TEST_DEV_COMM, TEST_DEV_DET};
 use rs_matter_stack::matter::dm::devices::DEV_TYPE_ON_OFF_LIGHT;
+use rs_matter_stack::matter::dm::endpoints::ROOT_ENDPOINT_ID;
 use rs_matter_stack::matter::dm::networks::unix::UnixNetifs;
 use rs_matter_stack::matter::dm::networks::wireless::NoopWirelessNetCtl;
 use rs_matter_stack::matter::dm::{Async, Dataver, Endpoint, Node};
@@ -79,6 +80,15 @@ fn main() -> Result<(), Error> {
     // Chain our endpoint clusters with the
     // (root) Endpoint 0 system clusters in the final handler
     let handler = EmptyHandler
+        // The Endpoint 0 system clusters that are ours to provide.
+        // The stack adds the operational network clusters (Network Commissioning,
+        // General Commissioning, General Diagnostics and Wifi/Thread/Ethernet
+        // Diagnostics) on top, because only it knows the network driver state.
+        // Chain any extra Endpoint 0 clusters of your own the same way.
+        .chain(
+            EpClMatcher::new(Some(ROOT_ENDPOINT_ID), None),
+            Async(WifiMatterStack::<0, ()>::root_handler(&(), &mut rand)),
+        )
         // Our on-off cluster, on Endpoint 1
         .chain(
             EpClMatcher::new(
@@ -135,8 +145,8 @@ fn main() -> Result<(), Error> {
 /// It is also a mandatory requirement when the `WifiBle` stack variation is used.
 static MATTER_STACK: StaticCell<WifiMatterStack<BUMP_SIZE>> = StaticCell::new();
 
-/// Endpoint 0 (the root endpoint) always runs
-/// the hidden Matter system clusters, so we pick ID=1
+/// Endpoint 0 (the root endpoint) runs the Matter system clusters,
+/// so we pick ID=1 for our light
 const LIGHT_ENDPOINT_ID: u16 = 1;
 
 /// The Matter Light device Node
