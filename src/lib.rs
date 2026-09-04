@@ -35,6 +35,8 @@ use rs_matter::im::{InteractionModel, InteractionModelState};
 use rs_matter::pairing::qr::QrTextType;
 use rs_matter::persist::{KvBlobStore, KvBlobStoreAccess};
 use rs_matter::respond::{DefaultResponder, ExchangeHandler, Responder};
+#[cfg(feature = "icd")]
+use rs_matter::persist::{ICD_CHECK_IN_COUNTER_KEY, ICD_REGISTERED_CLIENTS_KEY};
 use rs_matter::sc::pase::MAX_COMM_WINDOW_TIMEOUT_SECS;
 use rs_matter::transport::exchange::MatterBuffers;
 use rs_matter::transport::network::{
@@ -45,6 +47,11 @@ use rs_matter::utils::select::Coalesce;
 use rs_matter::utils::sync::blocking::Mutex;
 use rs_matter::utils::sync::{DynBase, IfMutex};
 use rs_matter::{BasicCommData, Matter, MATTER_PORT};
+
+#[cfg(feature = "icd")]
+use rs_matter::dm::clusters::icd_mgmt::{Icd, IcdModeConfig};
+#[cfg(feature = "icd")]
+use rs_matter::sc::checkin::CheckInCounter;
 
 use crate::bump::Bump;
 use crate::mdns::Mdns;
@@ -223,6 +230,14 @@ cfg_if! {
 
 const MAX_BUSY_RESPONDERS: usize = 2;
 
+/// How many Check-In counter increments elapse between two persisted counter
+/// boundaries. A restart resumes from the last persisted boundary, so this
+/// value trades flash wear (bigger = fewer writes) against how many Check-In
+/// counter values a single unclean shutdown can burn through (bigger = more
+/// values skipped on the next boot).
+#[cfg(feature = "icd")]
+const ICD_COUNTER_EPOCH: u32 = 1000;
+
 pub type MatterStackInteractionModel<'a, C, H, K, RN, NC> = InteractionModel<
     'a,
     C,
@@ -276,6 +291,12 @@ where
     #[allow(unused)]
     network: N,
     //netif_conf: Signal<Option<NetifConf>>,
+    /// The shared ICD (Intermittently Connected Device) state: Check-In
+    /// client registrations, the Check-In counter and the stay-active
+    /// deadline. Backs the ICD Management cluster wired onto the root
+    /// endpoint by each network type's `root_endpoint()` / `root_handler()`.
+    #[cfg(feature = "icd")]
+    icd: Icd,
 }
 
 impl<'a, const B: usize, N> MatterStack<'a, B, N>
@@ -283,6 +304,13 @@ where
     N: Network,
 {
     /// Create a new `MatterStack` instance.
+    ///
+    /// Not available (use [`Self::init`] instead) when the `icd` feature is
+    /// enabled: seeding the Check-In counter goes through
+    /// `CheckInCounter::new`, which `rs-matter` does not expose as a `const
+    /// fn`, so a `MatterStack` carrying `Icd` state cannot be built in a
+    /// `const` context.
+    #[cfg(not(feature = "icd"))]
     #[allow(clippy::large_stack_frames)]
     #[inline(always)]
     pub const fn new(
@@ -302,6 +330,45 @@ where
         }
     }
 
+    /// Create a new `MatterStack` instance with ICD (Intermittently Connected
+    /// Device) support.
+    ///
+    /// # Arguments
+    /// - `icd_mode` - the mode timings (idle/active durations, user-trigger
+    ///   hint) this device advertises through the ICD Management cluster.
+    /// - `icd_counter_seed` - a fresh random value for the Check-In counter,
+    ///   used only on the very first boot (i.e. before anything has been
+    ///   persisted yet). Once a counter boundary is persisted,
+    ///   [`Self::startup`] loads it and this seed is ignored. Supply real
+    ///   entropy here (e.g. from a hardware RNG read at boot) - the
+    ///   Check-In protocol's replay protection depends on it.
+    #[cfg(feature = "icd")]
+    #[allow(clippy::large_stack_frames)]
+    pub fn new(
+        dev_det: &'a BasicInfoConfig,
+        dev_comm: BasicCommData,
+        dev_att: &'a dyn DeviceAttestation,
+        icd_mode: IcdModeConfig,
+        icd_counter_seed: u32,
+    ) -> Self {
+        Self {
+            matter: Matter::new(dev_det, dev_comm, dev_att, MATTER_PORT),
+            buffers: MatterBuffers::new(),
+            state: MatterStackInteractionModelState::new(N::NETWORKS),
+            bump: Bump::new(),
+            run_lock: IfMutex::new(()),
+            im_hydrated: Mutex::new(Cell::new(false)),
+            network: N::INIT,
+            //netif_conf: Signal::new(None),
+            icd: Icd::new(
+                CheckInCounter::new(icd_counter_seed, ICD_COUNTER_EPOCH),
+                icd_mode,
+            ),
+        }
+    }
+
+    /// Return an in-place initializer for a `MatterStack`.
+    #[cfg(not(feature = "icd"))]
     #[allow(clippy::large_stack_frames)]
     pub fn init(
         dev_det: &'a BasicInfoConfig,
@@ -322,6 +389,44 @@ where
             im_hydrated: Mutex::new(Cell::new(false)),
             network <- N::init(),
             //netif_conf: Signal::new(None),
+        })
+    }
+
+    /// Return an in-place initializer for a `MatterStack` with ICD
+    /// (Intermittently Connected Device) support.
+    ///
+    /// # Arguments
+    /// - `icd_mode` - the mode timings (idle/active durations, user-trigger
+    ///   hint) this device advertises through the ICD Management cluster.
+    /// - `icd_counter_seed` - a fresh random value for the Check-In counter,
+    ///   used only on the very first boot; see [`Self::new`] for details.
+    #[cfg(feature = "icd")]
+    #[allow(clippy::large_stack_frames)]
+    pub fn init(
+        dev_det: &'a BasicInfoConfig,
+        dev_comm: BasicCommData,
+        dev_att: &'a dyn DeviceAttestation,
+        icd_mode: IcdModeConfig,
+        icd_counter_seed: u32,
+    ) -> impl Init<Self> {
+        init!(Self {
+            matter <- Matter::init(
+                dev_det,
+                dev_comm,
+                dev_att,
+                MATTER_PORT,
+            ),
+            buffers <- MatterBuffers::init(),
+            state <- MatterStackInteractionModelState::init(N::init_networks()),
+            bump <- Bump::init(),
+            run_lock <- IfMutex::init(()),
+            im_hydrated: Mutex::new(Cell::new(false)),
+            network <- N::init(),
+            //netif_conf: Signal::new(None),
+            icd <- Icd::init(
+                CheckInCounter::new(icd_counter_seed, ICD_COUNTER_EPOCH),
+                icd_mode,
+            ),
         })
     }
 
@@ -351,6 +456,71 @@ where
     /// - `store` - the raw [`KvBlobStore`] implementation to wrap
     pub fn kv<'s, S: KvBlobStore + 's>(&'s self, store: S) -> impl KvBlobStoreAccess + 's {
         self.matter().kv(store)
+    }
+
+    /// Get a reference to the shared ICD (Intermittently Connected Device)
+    /// state.
+    ///
+    /// Use this to drive Check-Ins ([`Icd::send_check_in`]), inspect the
+    /// current registration set, or wait on the stay-active deadline from
+    /// your own sleep/wake loop. `MatterStack` owns the ICD Management
+    /// cluster wiring and this state's persistence lifecycle (see
+    /// `startup`/`reset` of the concrete network types), but deliberately
+    /// does not decide *when* to send a Check-In - that stays app/hardware
+    /// specific.
+    #[cfg(feature = "icd")]
+    pub const fn icd(&self) -> &Icd {
+        &self.icd
+    }
+
+    /// Re-hydrate the ICD registrations and Check-In counter from `kv`, and
+    /// sync the mDNS `ICD` operating-mode TXT key so the very first
+    /// advertisement after a reboot is already correct.
+    ///
+    /// Called once from each network type's `startup()`, right after
+    /// `self.matter.startup(&kv)?`.
+    #[cfg(feature = "icd")]
+    pub(crate) fn startup_icd<K: KvBlobStoreAccess>(&self, kv: K) -> Result<(), Error> {
+        kv.access(|mut store, buf| {
+            self.icd.load_registrations(&mut store, buf)?;
+            self.icd.load_counter(&mut store, ICD_COUNTER_EPOCH, buf)?;
+
+            // `CheckInCounter::new` (which `load_counter` falls back to on a
+            // first boot, and otherwise reconstructs from the persisted
+            // boundary) requires its returned boundary to be persisted
+            // immediately: a restart must always resume past every value
+            // this run might use. Without this, a run that never advances
+            // the counter a full `ICD_COUNTER_EPOCH` (the common case: a few
+            // Check-Ins per wake window, nowhere near the epoch size) never
+            // triggers `advance_counter`'s own persist, so the next boot
+            // reloads the same starting point and replays counter values
+            // the previous run already sent - which a compliant client must
+            // then reject.
+            self.icd.persist_counter(&mut store, buf)?;
+
+            Ok::<_, Error>(())
+        })?;
+
+        self.matter().set_icd_mode(Some(self.icd.operating_mode()));
+
+        Ok(())
+    }
+
+    /// Wipe the persisted ICD registrations and Check-In counter.
+    ///
+    /// Called from each network type's `reset()`, alongside
+    /// `self.matter.factory_reset(&kv)?`. Mirrors `Matter::factory_reset`
+    /// itself: only the KV store is wiped here, not the in-memory `Icd`
+    /// state - a factory reset is expected to be followed by a reboot, same
+    /// as for the fabrics/basic-info state `Matter::factory_reset` resets.
+    #[cfg(feature = "icd")]
+    pub(crate) fn reset_icd<K: KvBlobStoreAccess>(&self, kv: K) -> Result<(), Error> {
+        kv.access(|store, buf| {
+            store.remove(ICD_REGISTERED_CLIENTS_KEY, buf)?;
+            store.remove(ICD_CHECK_IN_COUNTER_KEY, buf)?;
+
+            Ok::<_, Error>(())
+        })
     }
 
     // /// User code hook to get the state of the netif passed to the

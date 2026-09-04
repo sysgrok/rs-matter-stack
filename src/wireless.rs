@@ -485,6 +485,9 @@ where
 
         self.matter.factory_reset(&kv)?;
 
+        #[cfg(feature = "icd")]
+        self.reset_icd(&kv)?;
+
         // Reset the events counter and the wireless networks store so we don't
         // carry stale state across a factory reset (Matter Core spec R1.5.1,
         // §7.14.1.1 for the events watermark; the networks store holds the
@@ -519,6 +522,9 @@ where
         let kv = self.matter.kv(store);
 
         self.matter.startup(&kv)?;
+
+        #[cfg(feature = "icd")]
+        self.startup_icd(&kv)?;
 
         if !self.matter().has_fabrics() {
             info!("Device is not commissioned yet, opening commissioning window...");

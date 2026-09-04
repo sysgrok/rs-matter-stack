@@ -7,17 +7,25 @@ use rs_matter::dm::clusters::gen_comm::CommPolicy;
 use rs_matter::dm::clusters::gen_diag::{GenDiag, NetifDiag};
 use rs_matter::dm::clusters::net_comm::{DummyNetworks, NetworkType};
 use rs_matter::dm::clusters::sw_diag::SwDiag;
-use rs_matter::dm::endpoints::{eth_sys_handler, EthSysHandler, ROOT_ENDPOINT_ID};
+use rs_matter::dm::endpoints::{eth_sys_handler, ROOT_ENDPOINT_ID};
+#[cfg(not(feature = "icd"))]
+use rs_matter::dm::endpoints::EthSysHandler;
 use rs_matter::dm::networks::wireless::NoopWirelessNetCtl;
 use rs_matter::dm::networks::NetChangeNotif;
 use rs_matter::dm::{ChainedHandler, DataModel, Endpoint, EpClMatcher};
 use rs_matter::error::Error;
 use rs_matter::pairing::DiscoveryCapabilities;
 use rs_matter::persist::{KvBlobStore, KvBlobStoreAccess};
+#[cfg(not(feature = "icd"))]
 use rs_matter::root_endpoint;
 use rs_matter::transport::network::NoNetwork;
 use rs_matter::utils::init::{init, init_from_closure, Init};
 use rs_matter::utils::select::Coalesce;
+
+#[cfg(feature = "icd")]
+use rs_matter::dm::clusters::icd_mgmt::{ClusterHandler as _, IcdMgmtHandler};
+#[cfg(feature = "icd")]
+use rs_matter::dm::{Async, AsyncHandler, Dataver};
 
 use crate::mdns::Mdns;
 use crate::nal::NetStack;
@@ -170,14 +178,33 @@ where
 {
     /// Return a metadata for the root (Endpoint 0) of the Matter Node
     /// configured for Ethernet network.
+    #[cfg(not(feature = "icd"))]
     pub const fn root_endpoint() -> Endpoint<'static> {
         const ENDPOINT: Endpoint<'static> = root_endpoint!(eth);
 
         ENDPOINT
     }
 
+    /// Return a metadata for the root (Endpoint 0) of the Matter Node
+    /// configured for Ethernet network, with the ICD Management cluster
+    /// included.
+    #[cfg(feature = "icd")]
+    pub const fn root_endpoint() -> Endpoint<'static> {
+        const ENDPOINT: Endpoint<'static> = Endpoint {
+            id: ROOT_ENDPOINT_ID,
+            device_types: rs_matter::devices!(rs_matter::dm::devices::DEV_TYPE_ROOT_NODE),
+            clusters: rs_matter::clusters!(eth; IcdMgmtHandler::CLUSTER),
+            client_clusters: &[],
+            unique_id: None,
+            semantic_tags: &[],
+        };
+
+        ENDPOINT
+    }
+
     /// Return a handler for the root (Endpoint 0) of the Matter Node
     /// configured for Ethernet network.
+    #[cfg(not(feature = "icd"))]
     fn root_handler<'a>(
         &self,
         comm_policy: &'a dyn CommPolicy,
@@ -187,6 +214,24 @@ where
         rand: impl RngCore + Copy,
     ) -> EthSysHandler<'a> {
         eth_sys_handler(comm_policy, gen_diag, netif_diag, sw_diag, rand)
+    }
+
+    /// Return a handler for the root (Endpoint 0) of the Matter Node
+    /// configured for Ethernet network, with the ICD Management cluster
+    /// handler chained in.
+    #[cfg(feature = "icd")]
+    fn root_handler<'a>(
+        &'a self,
+        comm_policy: &'a dyn CommPolicy,
+        gen_diag: &'a dyn GenDiag,
+        netif_diag: &'a dyn NetifDiag,
+        sw_diag: &'a dyn SwDiag,
+        mut rand: impl RngCore + Copy,
+    ) -> impl AsyncHandler + 'a {
+        eth_sys_handler(comm_policy, gen_diag, netif_diag, sw_diag, rand).chain(
+            EpClMatcher::new(Some(ROOT_ENDPOINT_ID), Some(IcdMgmtHandler::CLUSTER.id)),
+            Async(IcdMgmtHandler::new(Dataver::new_rand(&mut rand), self.icd()).adapt()),
+        )
     }
 
     /// Reset the Matter instance to the factory defaults by removing all fabrics and basic info settings
@@ -203,6 +248,9 @@ where
         let kv = self.matter.kv(store);
 
         self.matter.factory_reset(&kv)?;
+
+        #[cfg(feature = "icd")]
+        self.reset_icd(&kv)?;
 
         // Reset the events counter (and the - no-op for Ethernet - networks store)
         // so we don't carry a stale watermark across a factory reset
@@ -235,6 +283,9 @@ where
         let kv = self.matter.kv(store);
 
         self.matter.startup(&kv)?;
+
+        #[cfg(feature = "icd")]
+        self.startup_icd(&kv)?;
 
         if !self.matter().has_fabrics() {
             info!("Device is not commissioned yet, opening commissioning window...");
