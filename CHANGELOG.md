@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   all of them - while the stack chains only Network Commissioning, General Commissioning,
   General Diagnostics and the network-type diagnostics cluster on top. This makes it possible
   to add custom clusters to Endpoint 0 (Diagnostic Logs, ICD Management, OTA, ...).
+* Update to the latest rs-matter: handler chain matchers are closures now
+  (`|e, c| e == LIGHT_ENDPOINT_ID && c == OnOffHandler::CLUSTER.id`)
+* (Breaking) Advertise **all** IPv6 addresses of the operational network interface over mDNS,
+  as the latest rs-matter does: `Mdns::run` takes `ipv6: &[Ipv6Addr]`
 
 ## [0.2.0] - 2026-08-20
 * Advertise over BLE only when the comm window is open

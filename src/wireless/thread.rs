@@ -8,6 +8,7 @@ use rs_matter::crypto::Crypto;
 use rs_matter::dm::clusters::gen_diag::NetifDiag;
 use rs_matter::dm::clusters::net_comm::{NetCtl, NetworkType};
 use rs_matter::dm::clusters::thread_diag::ThreadDiag;
+use rs_matter::dm::endpoints::thread_net_handler;
 use rs_matter::dm::networks::wireless::{self, NetCtlWithStatusImpl, NoopWirelessNetCtl};
 use rs_matter::dm::networks::NetChangeNotif;
 use rs_matter::dm::{DataModel, Endpoint};
@@ -17,7 +18,6 @@ use rs_matter::root_endpoint;
 use rs_matter::transport::network::NoNetwork;
 use rs_matter::utils::select::Coalesce;
 
-use crate::endpoints::thread_net_handler;
 use crate::mdns::Mdns;
 use crate::nal::NetStack;
 use crate::network::Embedding;

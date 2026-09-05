@@ -11,6 +11,14 @@ use rs_matter::Matter;
 
 use crate::udp;
 
+/// The maximum number of IPv6 addresses of the operational network interface
+/// that the stack tracks and advertises over mDNS.
+///
+/// The link-local address, a global unicast one and a unique local one - the set
+/// a commissioner needs to reach the node whichever of the three it is on - plus
+/// one spare. Anything beyond the limit is not advertised (with a warning).
+pub const MAX_NETIF_IPV6_ADDRS: usize = 4;
+
 /// A trait for running an mDNS responder.
 pub trait Mdns {
     /// Run the mDNS responder with the given UDP binding, MAC address, IPv4 and IPv6 addresses, and interface index.
@@ -22,8 +30,10 @@ pub trait Mdns {
     /// - `crypto`: An object implementing the `Crypto` trait for cryptographic operations.
     /// - `udp`: An object implementing the `UdpBind` trait for binding UDP sockets.
     /// - `mac`: The MAC address of the host, used to generate the hostname.
-    /// - `ipv4`: The IPv4 address of the host.
-    /// - `ipv6`: The IPv6 address of the host.
+    /// - `ipv4`: The IPv4 address of the host, or `Ipv4Addr::UNSPECIFIED` for none.
+    /// - `ipv6`: All IPv6 addresses of the host on the operational network interface -
+    ///   a link-local one and, where the network provides on-link prefixes, one or more
+    ///   routable (GUA / ULA) ones - as commissioners pick whichever of them they can reach.
     /// - `interface`: The interface index for the host, used for IPv6 multicast.
     #[allow(clippy::too_many_arguments)]
     async fn run<C, U>(
@@ -33,7 +43,7 @@ pub trait Mdns {
         udp: U,
         mac: &[u8],
         ipv4: Ipv4Addr,
-        ipv6: Ipv6Addr,
+        ipv6: &[Ipv6Addr],
         interface: u32,
     ) -> Result<(), Error>
     where
@@ -52,7 +62,7 @@ where
         udp: U,
         mac: &[u8],
         ipv4: Ipv4Addr,
-        ipv6: Ipv6Addr,
+        ipv6: &[Ipv6Addr],
         interface: u32,
     ) -> impl Future<Output = Result<(), Error>>
     where
@@ -71,7 +81,7 @@ impl Mdns for BuiltinMdns {
         udp: U,
         mac: &[u8],
         ipv4: Ipv4Addr,
-        ipv6: Ipv6Addr,
+        ipv6: &[Ipv6Addr],
         interface: u32,
     ) -> Result<(), Error>
     where
@@ -165,7 +175,7 @@ impl Mdns for rs_matter::transport::network::mdns::avahi::AvahiMdns {
         _udp: U,
         _mac: &[u8],
         _ipv4: Ipv4Addr,
-        _ipv6: Ipv6Addr,
+        _ipv6: &[Ipv6Addr],
         _interface: u32,
     ) -> impl Future<Output = Result<(), Error>>
     where
@@ -185,7 +195,7 @@ impl Mdns for rs_matter::transport::network::mdns::resolve::ResolveMdns {
         _udp: U,
         _mac: &[u8],
         _ipv4: Ipv4Addr,
-        _ipv6: Ipv6Addr,
+        _ipv6: &[Ipv6Addr],
         _interface: u32,
     ) -> impl Future<Output = Result<(), Error>>
     where
@@ -205,7 +215,7 @@ impl Mdns for rs_matter::transport::network::mdns::zeroconf::ZeroconfMdns {
         _udp: U,
         _mac: &[u8],
         _ipv4: Ipv4Addr,
-        _ipv6: Ipv6Addr,
+        _ipv6: &[Ipv6Addr],
         _interface: u32,
     ) -> impl Future<Output = Result<(), Error>>
     where
@@ -226,7 +236,7 @@ impl Mdns for rs_matter::transport::network::mdns::astro::AstroMdns {
         _udp: U,
         _mac: &[u8],
         _ipv4: Ipv4Addr,
-        _ipv6: Ipv6Addr,
+        _ipv6: &[Ipv6Addr],
         _interface: u32,
     ) -> Result<(), Error>
     where

@@ -5,6 +5,7 @@ use embassy_futures::select::select4;
 use rs_matter::crypto::Crypto;
 use rs_matter::dm::clusters::gen_diag::NetifDiag;
 use rs_matter::dm::clusters::net_comm::{DummyNetworks, NetworkType};
+use rs_matter::dm::endpoints::eth_net_handler;
 use rs_matter::dm::networks::wireless::NoopWirelessNetCtl;
 use rs_matter::dm::networks::NetChangeNotif;
 use rs_matter::dm::{DataModel, Endpoint};
@@ -16,7 +17,6 @@ use rs_matter::transport::network::NoNetwork;
 use rs_matter::utils::init::{init, init_from_closure, Init};
 use rs_matter::utils::select::Coalesce;
 
-use crate::endpoints::eth_net_handler;
 use crate::mdns::Mdns;
 use crate::nal::NetStack;
 use crate::network::{Embedding, Network};

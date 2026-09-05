@@ -14,7 +14,6 @@ use core::pin::pin;
 
 use log::info;
 
-use rs_matter_stack::endpoints::FnMatcher;
 use rs_matter_stack::eth::EthMatterStack;
 use rs_matter_stack::matter::crypto::{default_crypto, Crypto};
 use rs_matter_stack::matter::dm::clusters::app::on_off;
@@ -86,17 +85,17 @@ fn main() -> Result<(), Error> {
         // Diagnostics) on top, because only it knows the network driver state.
         // Chain any extra Endpoint 0 clusters of your own the same way.
         .chain(
-            FnMatcher(|e, _| e == ROOT_ENDPOINT_ID),
+            |e, _| e == ROOT_ENDPOINT_ID,
             Async(EthMatterStack::<0, ()>::root_handler(&(), &mut rand)),
         )
         .chain(
-            FnMatcher(|e, c| e == LIGHT_ENDPOINT_ID && c == TestOnOffDeviceLogic::CLUSTER.id),
+            |e, c| e == LIGHT_ENDPOINT_ID && c == TestOnOffDeviceLogic::CLUSTER.id,
             on_off::HandlerAsyncAdaptor(&on_off),
         )
         // Each Endpoint needs a Descriptor cluster too
         // Just use the one that `rs-matter` provides out of the box
         .chain(
-            FnMatcher(|e, c| e == LIGHT_ENDPOINT_ID && c == desc::DescHandler::CLUSTER.id),
+            |e, c| e == LIGHT_ENDPOINT_ID && c == desc::DescHandler::CLUSTER.id,
             Async(desc::DescHandler::new(Dataver::new_rand(&mut rand)).adapt()),
         );
 
