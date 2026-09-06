@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+* (Breaking) Update to `rand_core` 0.10 / `rand_chacha` 0.10, in sync with `rs-matter`
+* (Breaking) `rand::RngAdaptor` is now a *temporary* bridge between `rand_core` 0.9 and 0.10, in both directions (0.9-only TRNGs like `embassy-rp`'s into `reseeding_csprng`; `rs-matter`'s 0.10 RNG into 0.9-only consumers like `nrf-sdc`)
 * (Breaking) Endpoint 0 is no longer fully owned by the stack. The user handler now provides the
   system clusters that do not depend on the operational network (Descriptor, Basic Information,
   Administrator Commissioning, Operational Credentials, Access Control, Group Key Management,

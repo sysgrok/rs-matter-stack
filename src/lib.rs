@@ -22,7 +22,7 @@ use edge_nal::{UdpBind, UdpSplitMulticast};
 use embassy_futures::select::{select, select_slice};
 use embassy_time::Duration;
 
-use rs_matter::crypto::{Crypto, RngCore};
+use rs_matter::crypto::{Crypto, Rng};
 use rs_matter::dm::clusters::basic_info::BasicInfoConfig;
 use rs_matter::dm::clusters::dev_att::DeviceAttestation;
 use rs_matter::dm::clusters::gen_diag::NetifDiag;
@@ -300,7 +300,7 @@ where
     /// # Arguments
     /// - `sw_diag` - the `SwDiag` implementation (pass `&()` for the no-op default)
     /// - `rand` - a random number generator
-    pub fn root_handler<'r>(sw_diag: &'r dyn SwDiag, rand: impl RngCore) -> RootHandler<'r> {
+    pub fn root_handler<'r>(sw_diag: &'r dyn SwDiag, rand: impl Rng) -> RootHandler<'r> {
         rs_matter::dm::endpoints::root_handler(sw_diag, rand)
     }
 

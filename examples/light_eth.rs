@@ -64,7 +64,7 @@ fn main() -> Result<(), Error> {
     ));
 
     // The default crypto provider
-    let crypto = default_crypto(rand::thread_rng(), DAC_PRIVKEY);
+    let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
 
     let mut rand = crypto.weak_rand()?;
 
