@@ -24,9 +24,10 @@ use rs_matter_stack::matter::dm::clusters::desc::ClusterHandler as _;
 use rs_matter_stack::matter::dm::devices::test::DAC_PRIVKEY;
 use rs_matter_stack::matter::dm::devices::test::{TEST_DEV_ATT, TEST_DEV_COMM, TEST_DEV_DET};
 use rs_matter_stack::matter::dm::devices::DEV_TYPE_ON_OFF_LIGHT;
+use rs_matter_stack::matter::dm::endpoints::ROOT_ENDPOINT_ID;
 use rs_matter_stack::matter::dm::networks::unix::UnixNetifs;
+use rs_matter_stack::matter::dm::EmptyHandler;
 use rs_matter_stack::matter::dm::{Async, Dataver, Endpoint, Node};
-use rs_matter_stack::matter::dm::{EmptyHandler, EpClMatcher};
 use rs_matter_stack::matter::error::Error;
 use rs_matter_stack::matter::persist::DirKvBlobStore;
 use rs_matter_stack::matter::transport::network::mdns::zeroconf::ZeroconfMdns;
@@ -63,7 +64,7 @@ fn main() -> Result<(), Error> {
     ));
 
     // The default crypto provider
-    let crypto = default_crypto(rand::thread_rng(), DAC_PRIVKEY);
+    let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
 
     let mut rand = crypto.weak_rand()?;
 
@@ -78,17 +79,23 @@ fn main() -> Result<(), Error> {
     // Chain our endpoint clusters with the
     // (root) Endpoint 0 system clusters in the final handler
     let handler = EmptyHandler
+        // The Endpoint 0 system clusters that are ours to provide.
+        // The stack adds the operational network clusters (Network Commissioning,
+        // General Commissioning, General Diagnostics and Wifi/Thread/Ethernet
+        // Diagnostics) on top, because only it knows the network driver state.
+        // Chain any extra Endpoint 0 clusters of your own the same way.
         .chain(
-            EpClMatcher::new(
-                Some(LIGHT_ENDPOINT_ID),
-                Some(TestOnOffDeviceLogic::CLUSTER.id),
-            ),
+            |e, _| e == ROOT_ENDPOINT_ID,
+            Async(EthMatterStack::<0, ()>::root_handler(&(), &mut rand)),
+        )
+        .chain(
+            |e, c| e == LIGHT_ENDPOINT_ID && c == TestOnOffDeviceLogic::CLUSTER.id,
             on_off::HandlerAsyncAdaptor(&on_off),
         )
         // Each Endpoint needs a Descriptor cluster too
         // Just use the one that `rs-matter` provides out of the box
         .chain(
-            EpClMatcher::new(Some(LIGHT_ENDPOINT_ID), Some(desc::DescHandler::CLUSTER.id)),
+            |e, c| e == LIGHT_ENDPOINT_ID && c == desc::DescHandler::CLUSTER.id,
             Async(desc::DescHandler::new(Dataver::new_rand(&mut rand)).adapt()),
         );
 
@@ -126,8 +133,8 @@ fn main() -> Result<(), Error> {
 /// program stack blowups.
 static MATTER_STACK: StaticCell<EthMatterStack<BUMP_SIZE, ()>> = StaticCell::new();
 
-/// Endpoint 0 (the root endpoint) always runs
-/// the hidden Matter system clusters, so we pick ID=1
+/// Endpoint 0 (the root endpoint) runs the Matter system clusters,
+/// so we pick ID=1 for our light
 const LIGHT_ENDPOINT_ID: u16 = 1;
 
 /// The Matter Light device Node

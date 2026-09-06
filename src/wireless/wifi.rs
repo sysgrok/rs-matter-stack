@@ -4,17 +4,14 @@ use core::pin::pin;
 
 use embassy_futures::select::{select, select3, select4};
 
-use rs_matter::crypto::{Crypto, RngCore};
-use rs_matter::dm::clusters::gen_comm::CommPolicy;
-use rs_matter::dm::clusters::gen_diag::GenDiag;
+use rs_matter::crypto::Crypto;
 use rs_matter::dm::clusters::gen_diag::NetifDiag;
-use rs_matter::dm::clusters::net_comm::{NetCtl, NetCtlStatus, NetworkType};
-use rs_matter::dm::clusters::sw_diag::SwDiag;
+use rs_matter::dm::clusters::net_comm::{NetCtl, NetworkType};
 use rs_matter::dm::clusters::wifi_diag::WifiDiag;
-use rs_matter::dm::endpoints::{wifi_sys_handler, WifiSysHandler, ROOT_ENDPOINT_ID};
+use rs_matter::dm::endpoints::wifi_net_handler;
 use rs_matter::dm::networks::wireless::{self, NetCtlWithStatusImpl, NoopWirelessNetCtl};
 use rs_matter::dm::networks::NetChangeNotif;
-use rs_matter::dm::{ChainedHandler, DataModel, Endpoint, EpClMatcher};
+use rs_matter::dm::{DataModel, Endpoint};
 use rs_matter::error::Error;
 use rs_matter::persist::KvBlobStoreAccess;
 use rs_matter::root_endpoint;
@@ -260,32 +257,6 @@ where
 
         ENDPOINT
     }
-
-    /// Return a handler for the root (Endpoint 0) of the Matter Node
-    /// configured for BLE+Wifi network.
-    #[allow(clippy::too_many_arguments)]
-    fn root_handler<'a, C>(
-        &'a self,
-        comm_policy: &'a dyn CommPolicy,
-        gen_diag: &'a dyn GenDiag,
-        netif_diag: &'a dyn NetifDiag,
-        net_ctl: &'a C,
-        sw_diag: &'a dyn SwDiag,
-        rand: impl RngCore + Copy,
-    ) -> WifiSysHandler<'a, &'a C>
-    where
-        C: NetCtl + NetCtlStatus + WifiDiag,
-    {
-        wifi_sys_handler(
-            comm_policy,
-            gen_diag,
-            netif_diag,
-            net_ctl,
-            sw_diag,
-            net_ctl,
-            rand,
-        )
-    }
 }
 
 /// A trait representing a task that needs access to the operational wireless interface (Wifi or Thread)
@@ -496,13 +467,18 @@ where
             WirelessNetCtl::<Q>::Commissioning(NetworkType::Wifi),
         );
 
-        let sys =
-            self.stack
-                .root_handler(&false, &(), &(), &net_ctl, &(), self.crypto.weak_rand()?);
-        let combined = ChainedHandler::new(
-            EpClMatcher::new(Some(ROOT_ENDPOINT_ID), None),
-            sys,
+        // No netif during the BLE phase; the operational network clusters
+        // are chained on top of the user's handler with the commissioning
+        // net-ctl, and re-chained with the operational one once Wifi/Thread
+        // is up (`WifiTask::run`).
+        let combined = wifi_net_handler(
+            &false,
+            &(),
+            &(),
+            &net_ctl,
+            &net_ctl,
             &self.handler,
+            self.crypto.weak_rand()?,
         );
         // The network store comes from the stack's `state`; the (commissioning)
         // net-ctl is threaded into the engine, whose `run` keeps its connection
@@ -549,18 +525,14 @@ where
             WirelessNetCtl::Operational(&net_ctl),
         );
 
-        let sys = self.stack.root_handler(
+        let combined = wifi_net_handler(
             &false,
             &(),
             &netif,
             &net_ctl_s,
-            &(),
-            self.crypto.weak_rand()?,
-        );
-        let combined = ChainedHandler::new(
-            EpClMatcher::new(Some(ROOT_ENDPOINT_ID), None),
-            sys,
+            &net_ctl_s,
             &self.handler,
+            self.crypto.weak_rand()?,
         );
         // The operational `net_ctl` is threaded into the engine, which now drives
         // the maintenance `WirelessMgr` itself (against the stack's networks store).
@@ -662,18 +634,14 @@ where
             WirelessNetCtl::Operational(&net_ctl),
         );
 
-        let sys = self.stack.root_handler(
+        let combined = wifi_net_handler(
             &true,
             &(),
             &netif,
             &net_ctl_s,
-            &(),
-            self.crypto.weak_rand()?,
-        );
-        let combined = ChainedHandler::new(
-            EpClMatcher::new(Some(ROOT_ENDPOINT_ID), None),
-            sys,
+            &net_ctl_s,
             &self.handler,
+            self.crypto.weak_rand()?,
         );
         // The operational `net_ctl` is threaded into the engine, which drives the
         // maintenance `WirelessMgr` itself; `run_net_coex` only runs the BTP coex
