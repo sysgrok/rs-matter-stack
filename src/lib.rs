@@ -22,12 +22,14 @@ use edge_nal::{UdpBind, UdpSplitMulticast};
 use embassy_futures::select::{select, select_slice};
 use embassy_time::Duration;
 
-use rs_matter::crypto::Crypto;
+use rs_matter::crypto::{Crypto, Rng};
 use rs_matter::dm::clusters::basic_info::BasicInfoConfig;
 use rs_matter::dm::clusters::dev_att::DeviceAttestation;
 use rs_matter::dm::clusters::gen_diag::NetifDiag;
 use rs_matter::dm::clusters::net_comm::{NetCtl, NetCtlStatus, Networks};
+use rs_matter::dm::clusters::sw_diag::SwDiag;
 use rs_matter::dm::clusters::wifi_diag::WirelessDiag;
+use rs_matter::dm::endpoints::RootHandler;
 use rs_matter::dm::networks::NetChangeNotif;
 use rs_matter::dm::{AttrChangeNotifier, AttrId, ClusterId, DataModel, EndptId};
 use rs_matter::error::{Error, ErrorCode};
@@ -42,12 +44,13 @@ use rs_matter::transport::network::{
 };
 use rs_matter::utils::init::{init, Init};
 use rs_matter::utils::select::Coalesce;
+use rs_matter::utils::storage::Vec;
 use rs_matter::utils::sync::blocking::Mutex;
 use rs_matter::utils::sync::{DynBase, IfMutex};
 use rs_matter::{BasicCommData, Matter, MATTER_PORT};
 
 use crate::bump::Bump;
-use crate::mdns::Mdns;
+use crate::mdns::{Mdns, MAX_NETIF_IPV6_ADDRS};
 use crate::nal::NetStack;
 use crate::network::Network;
 
@@ -282,6 +285,25 @@ impl<'a, const B: usize, N> MatterStack<'a, B, N>
 where
     N: Network,
 {
+    /// Return the user-owned system handler for the root endpoint (Endpoint 0).
+    ///
+    /// The returned chain services every root endpoint system cluster except the
+    /// operational network ones (Network Commissioning, the network-type diagnostics
+    /// cluster, General Diagnostics and General Commissioning), which the stack
+    /// chains on top of the user handler by itself, per network type and - with
+    /// non-concurrent commissioning - per commissioning phase.
+    ///
+    /// Chain the returned handler (wrapped in `Async`) with the application
+    /// clusters, and with any additional root endpoint clusters, and pass the
+    /// result as the `handler` argument of the `run*` methods.
+    ///
+    /// # Arguments
+    /// - `sw_diag` - the `SwDiag` implementation (pass `&()` for the no-op default)
+    /// - `rand` - a random number generator
+    pub fn root_handler<'r>(sw_diag: &'r dyn SwDiag, rand: impl Rng) -> RootHandler<'r> {
+        rs_matter::dm::endpoints::root_handler(sw_diag, rand)
+    }
+
     /// Create a new `MatterStack` instance.
     #[allow(clippy::large_stack_frames)]
     #[inline(always)]
@@ -517,7 +539,7 @@ where
         #[derive(Clone, Debug, Eq, PartialEq, Hash)]
         #[cfg_attr(feature = "defmt", derive(defmt::Format))]
         struct NetifState {
-            ipv6: Ipv6Addr,
+            ipv6: Vec<Ipv6Addr, MAX_NETIF_IPV6_ADDRS>,
             ipv4: Ipv4Addr,
             mac: [u8; 8],
             operational: bool,
@@ -527,7 +549,7 @@ where
         impl NetifState {
             pub const fn new() -> Self {
                 Self {
-                    ipv6: Ipv6Addr::UNSPECIFIED,
+                    ipv6: Vec::new(),
                     ipv4: Ipv4Addr::UNSPECIFIED,
                     mac: [0; 8],
                     operational: false,
@@ -541,14 +563,27 @@ where
             I: NetifDiag,
         {
             state.operational = false;
-            state.ipv6 = Ipv6Addr::UNSPECIFIED;
+            state.ipv6.clear();
             state.ipv4 = Ipv4Addr::UNSPECIFIED;
             state.mac = [0; 8];
 
             net_diag.netifs(&mut |ni| {
                 if ni.operational && !ni.ipv6_addrs.is_empty() {
                     state.operational = true;
-                    state.ipv6 = ni.ipv6_addrs[0];
+                    state.ipv6.clear();
+                    for addr in ni.ipv6_addrs {
+                        if addr.is_unspecified() || state.ipv6.contains(addr) {
+                            continue;
+                        }
+
+                        if state.ipv6.push(*addr).is_err() {
+                            warn!(
+                                "Netif {} has more than {} IPv6 addresses; {} will not be advertised",
+                                ni.name, MAX_NETIF_IPV6_ADDRS, addr
+                            );
+                            break;
+                        }
+                    }
                     state.ipv4 = ni
                         .ipv4_addrs
                         .first()
@@ -614,7 +649,7 @@ where
                                 &udp_bind,
                                 &cur_state.mac,
                                 cur_state.ipv4,
-                                cur_state.ipv6,
+                                &cur_state.ipv6,
                                 cur_state.netif_index,
                             )
                             .await;
