@@ -1,6 +1,6 @@
 [package]
 name = "rs-matter-stack"
-version = "0.2.0"
+version = "0.3.0"
 authors = ["ivmarkov <ivan.markov@gmail.com>"]
 edition = "2021"
 resolver = "2"
@@ -12,8 +12,8 @@ license = "MIT OR Apache-2.0"
 readme = "README.md"
 rust-version = "1.87"
 
-[patch.crates-io]
-rs-matter = { git = "https://github.com/project-chip/rs-matter" }
+#[patch.crates-io]
+#rs-matter = { git = "https://github.com/project-chip/rs-matter" }
 #rs-matter = { path = "../rs-matter/rs-matter" }
 
 [profile.dev]
@@ -253,14 +253,14 @@ examples = ["log", "os", "nix", "embassy-time-queue-utils/generic-queue-64", "ze
 cfg-if = "1"
 log = { version = "0.4", default-features = false, optional = true }
 defmt = { version = "1", default-features = false, optional = true, features = ["ip_in_core"] }
-heapless = "0.9"
+heapless = { version = "0.9", default-features = false }
 enumset = { version = "1", default-features = false }
 bitflags = { version =  "2.5", default-features = false }
 scopeguard = { version = "1", default-features = false }
 embassy-futures = "0.1"
 embassy-sync = "0.8"
 embassy-time = "0.5"
-rs-matter = { version = "0.3", default-features = false }
+rs-matter = { version = "0.4", default-features = false }
 edge-nal = "0.7"
 edge-nal-std = { version = "0.7", optional = true }
 edge-mdns = { version = "0.8", optional = true }
