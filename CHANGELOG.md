@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+* (Breaking) The bump allocator (`bump` module, `pin_alloc!`/`alloc!`) is gone, and with it the
+  `B` (bump size) const generic of `MatterStack`, `EthMatterStack`, `WirelessMatterStack`,
+  `WifiMatterStack` and `ThreadMatterStack`. All futures created by the `run*` methods are now
+  plain nested futures. Drop the `BUMP_SIZE` argument: `EthMatterStack<BUMP_SIZE, ()>` becomes
+  `EthMatterStack<()>`, `WifiMatterStack<BUMP_SIZE>` becomes `WifiMatterStack`, etc.
+  Requires an `rs-matter` which contains the `Responder::run` handler double-storage fix;
+  without it, the `run*` futures grow by one extra copy of the exchange handlers.
+
 ## [0.3.0] - 2026-09-14
 * (Breaking) Update to `rand_core` 0.10 / `rand_chacha` 0.10, in sync with `rs-matter`
 * (Breaking) `rand::RngAdaptor` is now a *temporary* bridge between `rand_core` 0.9 and 0.10, in both directions (0.9-only TRNGs like `embassy-rp`'s into `reseeding_csprng`; `rs-matter`'s 0.10 RNG into 0.9-only consumers like `nrf-sdc`)

@@ -12,7 +12,7 @@ license = "MIT OR Apache-2.0"
 readme = "README.md"
 rust-version = "1.87"
 
-#[patch.crates-io]
+[patch.crates-io]
 #rs-matter = { git = "https://github.com/project-chip/rs-matter" }
 #rs-matter = { path = "../rs-matter/rs-matter" }
 
@@ -256,7 +256,6 @@ defmt = { version = "1", default-features = false, optional = true, features = [
 heapless = { version = "0.9", default-features = false }
 enumset = { version = "1", default-features = false }
 bitflags = { version =  "2.5", default-features = false }
-scopeguard = { version = "1", default-features = false }
 embassy-futures = "0.1"
 embassy-sync = "0.8"
 embassy-time = "0.5"

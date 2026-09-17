@@ -22,15 +22,14 @@ use crate::mdns::Mdns;
 use crate::nal::NetStack;
 use crate::network::Embedding;
 use crate::wireless::{GattPeripheral, MatterStackWirelessTask, WirelessNetCtl};
-use crate::{pin_alloc, UserTask};
+use crate::UserTask;
 
 use super::{Gatt, GattTask, PreexistingWireless, WirelessMatterStack};
 
 /// A type alias for a Matter stack running over Wifi (and BLE, during commissioning).
-pub type WifiMatterStack<'a, const B: usize, E = ()> =
-    WirelessMatterStack<'a, B, wireless::Wifi, E>;
+pub type WifiMatterStack<'a, E = ()> = WirelessMatterStack<'a, wireless::Wifi, E>;
 
-impl<const B: usize, E> WirelessMatterStack<'_, B, wireless::Wifi, E>
+impl<E> WirelessMatterStack<'_, wireless::Wifi, E>
 where
     E: Embedding,
 {
@@ -106,18 +105,9 @@ where
 
         info!("Matter Stack memory: {}b", core::mem::size_of_val(self));
 
-        // Since this is the last code executed in the method, resetting the allocator should be safe
-        // because all boxes returned by it should be dropped by then
-        let _defer = scopeguard::guard((), |_| unsafe {
-            self.bump.reset();
-        });
-
         self.matter().reset_transport()?;
 
-        let net_task = pin_alloc!(
-            self.bump,
-            self.run_wifi_coex(&mut wifi, crypto, handler, kv, user)
-        );
+        let net_task = pin!(self.run_wifi_coex(&mut wifi, crypto, handler, kv, user));
 
         net_task.await
     }
@@ -149,15 +139,9 @@ where
 
         info!("Matter Stack memory: {}b", core::mem::size_of_val(self));
 
-        // Since this is the last code executed in the method, resetting the allocator should be safe
-        // because all boxes returned by it should be dropped by then
-        let _defer = scopeguard::guard((), |_| unsafe {
-            self.bump.reset();
-        });
-
         self.matter().reset_transport()?;
 
-        let net_task = pin_alloc!(self.bump, self.run_wifi(wifi, crypto, handler, kv, user));
+        let net_task = pin!(self.run_wifi(wifi, crypto, handler, kv, user));
 
         net_task.await
     }
@@ -181,7 +165,7 @@ where
         // phantom net-ctl type is an irrelevant placeholder.
         // `&kv` is also lent to the driver so it can persist its own state.
         wifi.run(
-            MatterStackWirelessTask::<'_, _, _, _, _, _, _, _, NoopWirelessNetCtl> {
+            MatterStackWirelessTask::<'_, _, _, _, _, _, _, NoopWirelessNetCtl> {
                 stack: self,
                 crypto,
                 handler,
@@ -223,7 +207,7 @@ where
 
                 Gatt::run(
                     &mut wifi,
-                    MatterStackWirelessTask::<'_, _, _, _, _, _, _, _, <W as Wifi>::NetCtl<'_>> {
+                    MatterStackWirelessTask::<'_, _, _, _, _, _, _, <W as Wifi>::NetCtl<'_>> {
                         stack: self,
                         crypto: &crypto,
                         handler: &handler,
@@ -237,7 +221,7 @@ where
 
             Wifi::run(
                 &mut wifi,
-                MatterStackWirelessTask::<'_, _, _, _, _, _, _, _, <W as Wifi>::NetCtl<'_>> {
+                MatterStackWirelessTask::<'_, _, _, _, _, _, _, <W as Wifi>::NetCtl<'_>> {
                     stack: self,
                     crypto: &crypto,
                     handler: &handler,
@@ -449,8 +433,8 @@ where
     }
 }
 
-impl<'a, const B: usize, E, C, H, K, U, Q> GattTask
-    for MatterStackWirelessTask<'a, B, wireless::Wifi, E, C, H, K, U, Q>
+impl<'a, E, C, H, K, U, Q> GattTask
+    for MatterStackWirelessTask<'a, wireless::Wifi, E, C, H, K, U, Q>
 where
     E: Embedding,
     C: Crypto,
@@ -495,8 +479,8 @@ where
     }
 }
 
-impl<'a, const B: usize, E, C, H, K, X, Z> WifiTask
-    for MatterStackWirelessTask<'a, B, wireless::Wifi, E, C, H, K, X, Z>
+impl<'a, E, C, H, K, X, Z> WifiTask
+    for MatterStackWirelessTask<'a, wireless::Wifi, E, C, H, K, X, Z>
 where
     E: Embedding,
     C: Crypto,
@@ -602,8 +586,8 @@ where
     }
 }
 
-impl<'a, const B: usize, E, C, H, K, X, Z> WifiCoexTask
-    for MatterStackWirelessTask<'a, B, wireless::Wifi, E, C, H, K, X, Z>
+impl<'a, E, C, H, K, X, Z> WifiCoexTask
+    for MatterStackWirelessTask<'a, wireless::Wifi, E, C, H, K, X, Z>
 where
     E: Embedding,
     C: Crypto,
@@ -654,16 +638,12 @@ where
         );
 
         let stack = &self.stack;
-        let bump = &stack.bump;
+        let mut net_task =
+            pin!(stack.run_net_coex(&self.crypto, &net_stack, &netif, &mut mdns, &mut gatt));
 
-        let mut net_task = pin_alloc!(
-            bump,
-            stack.run_net_coex(&self.crypto, &net_stack, &netif, &mut mdns, &mut gatt)
-        );
+        let mut im_task = pin!(self.stack.run_im(&im));
 
-        let mut im_task = pin_alloc!(bump, self.stack.run_im_with_bump(&im));
-
-        let mut user_task = pin_alloc!(bump, self.user_task.run(&net_stack, &netif));
+        let mut user_task = pin!(self.user_task.run(&net_stack, &netif));
 
         select3(&mut net_task, &mut im_task, &mut user_task)
             .coalesce()

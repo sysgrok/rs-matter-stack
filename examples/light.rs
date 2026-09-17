@@ -37,18 +37,6 @@ use rs_matter_stack::wireless::WifiMatterStack;
 
 use static_cell::StaticCell;
 
-/// The amount of memory for allocating all `rs-matter-stack` futures created during
-/// the execution of the `run*` methods.
-/// This does NOT include the rest of the Matter stack.
-///
-/// The futures of `rs-matter-stack` created during the execution of the `run*` methods
-/// are allocated in a special way using a small bump allocator which results
-/// in a much lower memory usage by those.
-///
-/// If - for your platform - this size is not enough, increase it until
-/// the program runs without panics during the stack initialization.
-const BUMP_SIZE: usize = 23500;
-
 fn main() -> Result<(), Error> {
     env_logger::init_from_env(
         env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "info"),
@@ -87,7 +75,7 @@ fn main() -> Result<(), Error> {
         // Chain any extra Endpoint 0 clusters of your own the same way.
         .chain(
             |e, _| e == ROOT_ENDPOINT_ID,
-            Async(WifiMatterStack::<0, ()>::root_handler(&(), &mut rand)),
+            Async(WifiMatterStack::<()>::root_handler(&(), &mut rand)),
         )
         // Our on-off cluster, on Endpoint 1
         .chain(
@@ -140,7 +128,7 @@ fn main() -> Result<(), Error> {
 /// The Matter stack is allocated statically to avoid
 /// program stack blowups.
 /// It is also a mandatory requirement when the `WifiBle` stack variation is used.
-static MATTER_STACK: StaticCell<WifiMatterStack<BUMP_SIZE>> = StaticCell::new();
+static MATTER_STACK: StaticCell<WifiMatterStack> = StaticCell::new();
 
 /// Endpoint 0 (the root endpoint) runs the Matter system clusters,
 /// so we pick ID=1 for our light
@@ -149,7 +137,7 @@ const LIGHT_ENDPOINT_ID: u16 = 1;
 /// The Matter Light device Node
 const NODE: Node = Node {
     endpoints: &[
-        WifiMatterStack::<0, ()>::root_endpoint(),
+        WifiMatterStack::<()>::root_endpoint(),
         Endpoint::new(
             LIGHT_ENDPOINT_ID,
             devices!(DEV_TYPE_ON_OFF_LIGHT),

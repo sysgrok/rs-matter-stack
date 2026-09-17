@@ -1,4 +1,5 @@
 use core::future::Future;
+use core::pin::pin;
 
 use embassy_futures::select::select4;
 
@@ -21,7 +22,7 @@ use crate::mdns::Mdns;
 use crate::nal::NetStack;
 use crate::network::{Embedding, Network};
 use crate::private::Sealed;
-use crate::{pin_alloc, DummyAttrNotifier, MatterStack, UserTask};
+use crate::{DummyAttrNotifier, MatterStack, UserTask};
 
 /// An implementation of the `Network` trait for Ethernet.
 ///
@@ -80,7 +81,7 @@ where
 }
 
 // A type alias for a Matter stack running over Ethernet.
-pub type EthMatterStack<'a, const B: usize, E = ()> = MatterStack<'a, B, Eth<E>>;
+pub type EthMatterStack<'a, E = ()> = MatterStack<'a, Eth<E>>;
 
 /// A trait representing a task that needs access to the operational Ethernet interface
 /// (Network stack and Netif) to perform its work.
@@ -162,7 +163,7 @@ where
 }
 
 /// A specialization of the `MatterStack` for Ethernet.
-impl<const B: usize, E> MatterStack<'_, B, Eth<E>>
+impl<E> MatterStack<'_, Eth<E>>
 where
     E: Embedding,
 {
@@ -298,18 +299,9 @@ where
 
         info!("Matter Stack memory: {}b", core::mem::size_of_val(self));
 
-        // Since this is the last code executed in the method, resetting the allocator should be safe
-        // because all boxes returned by it should be dropped by then
-        let _defer = scopeguard::guard((), |_| unsafe {
-            self.bump.reset();
-        });
-
         self.matter().reset_transport()?;
 
-        let net_task = pin_alloc!(
-            self.bump,
-            self.run_ethernet(&mut ethernet, crypto, handler, &kv, user)
-        );
+        let net_task = pin!(self.run_ethernet(&mut ethernet, crypto, handler, &kv, user));
 
         net_task.await
     }
@@ -342,7 +334,7 @@ where
     }
 }
 
-struct MatterStackEthernetTask<'a, const B: usize, E, C, H, K, X>
+struct MatterStackEthernetTask<'a, E, C, H, K, X>
 where
     E: Embedding,
     C: Crypto,
@@ -350,14 +342,14 @@ where
     K: KvBlobStoreAccess,
     X: UserTask,
 {
-    stack: &'a MatterStack<'a, B, Eth<E>>,
+    stack: &'a MatterStack<'a, Eth<E>>,
     crypto: C,
     handler: H,
     kv: K,
     user_task: X,
 }
 
-impl<const B: usize, E, C, H, K, X> EthernetTask for MatterStackEthernetTask<'_, B, E, C, H, K, X>
+impl<E, C, H, K, X> EthernetTask for MatterStackEthernetTask<'_, E, C, H, K, X>
 where
     E: Embedding,
     C: Crypto,
@@ -388,26 +380,22 @@ where
             NoopWirelessNetCtl::new(NetworkType::Ethernet),
         );
 
-        let mut net_task = pin_alloc!(
-            self.stack.bump,
-            self.stack.run_oper_net(
-                &self.crypto,
-                &net_stack,
-                0, // TODO
-                core::future::pending(),
-                Option::<(NoNetwork, NoNetwork)>::None,
-            )
-        );
+        let mut net_task = pin!(self.stack.run_oper_net(
+            &self.crypto,
+            &net_stack,
+            0, // TODO
+            core::future::pending(),
+            Option::<(NoNetwork, NoNetwork)>::None,
+        ));
 
-        let mut mdns_task = pin_alloc!(
-            self.stack.bump,
-            self.stack
-                .run_oper_netif_mdns(&self.crypto, &net_stack, &netif, &mut mdns)
-        );
+        let mut mdns_task =
+            pin!(self
+                .stack
+                .run_oper_netif_mdns(&self.crypto, &net_stack, &netif, &mut mdns));
 
-        let mut im_task = pin_alloc!(self.stack.bump, self.stack.run_im_with_bump(&im));
+        let mut im_task = pin!(self.stack.run_im(&im));
 
-        let mut user_task = pin_alloc!(self.stack.bump, self.user_task.run(&net_stack, &netif));
+        let mut user_task = pin!(self.user_task.run(&net_stack, &netif));
 
         select4(&mut net_task, &mut mdns_task, &mut im_task, &mut user_task)
             .coalesce()

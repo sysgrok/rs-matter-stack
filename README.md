@@ -97,18 +97,6 @@ use rs_matter_stack::matter::{clusters, devices};
 
 use static_cell::StaticCell;
 
-/// The amount of memory for allocating all `rs-matter-stack` futures created during
-/// the execution of the `run*` methods.
-/// This does NOT include the rest of the Matter stack.
-///
-/// The futures of `rs-matter-stack` created during the execution of the `run*` methods
-/// are allocated in a special way using a small bump allocator which results
-/// in a much lower memory usage by those.
-///
-/// If - for your platform - this size is not enough, increase it until
-/// the program runs without panics during the stack initialization.
-const BUMP_SIZE: usize = 23500;
-
 fn main() -> Result<(), Error> {
     env_logger::init_from_env(
         env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "info"),
@@ -147,7 +135,7 @@ fn main() -> Result<(), Error> {
         // Chain any extra Endpoint 0 clusters of your own the same way.
         .chain(
             |e, _| e == ROOT_ENDPOINT_ID,
-            Async(EthMatterStack::<0, ()>::root_handler(&(), &mut rand)),
+            Async(EthMatterStack::<()>::root_handler(&(), &mut rand)),
         )
         .chain(
             |e, c| e == LIGHT_ENDPOINT_ID && c == TestOnOffDeviceLogic::CLUSTER.id,
@@ -192,7 +180,7 @@ fn main() -> Result<(), Error> {
 
 /// The Matter stack is allocated statically to avoid
 /// program stack blowups.
-static MATTER_STACK: StaticCell<EthMatterStack<BUMP_SIZE, ()>> = StaticCell::new();
+static MATTER_STACK: StaticCell<EthMatterStack<()>> = StaticCell::new();
 
 /// Endpoint 0 (the root endpoint) runs the Matter system clusters,
 /// so we pick ID=1 for our light
@@ -201,7 +189,7 @@ const LIGHT_ENDPOINT_ID: u16 = 1;
 /// The Matter Light device Node
 const NODE: Node = Node {
     endpoints: &[
-        EthMatterStack::<0, ()>::root_endpoint(),
+        EthMatterStack::<()>::root_endpoint(),
         Endpoint::new(
             LIGHT_ENDPOINT_ID,
             devices!(DEV_TYPE_ON_OFF_LIGHT),

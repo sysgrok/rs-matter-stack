@@ -30,7 +30,7 @@ use crate::mdns::Mdns;
 use crate::nal::NetStack;
 use crate::network::{Embedding, Network};
 use crate::private::Sealed;
-use crate::{pin_alloc, DummyAttrNotifier, MatterStack};
+use crate::{DummyAttrNotifier, MatterStack};
 
 pub use gatt::*;
 pub use thread::*;
@@ -43,7 +43,7 @@ mod wifi;
 pub const MAX_WIRELESS_NETWORKS: usize = 2;
 
 /// A type alias for a Matter stack running over either Wifi or Thread (and BLE, during commissioning).
-pub type WirelessMatterStack<'a, const B: usize, T, E = ()> = MatterStack<'a, B, WirelessBle<T, E>>;
+pub type WirelessMatterStack<'a, T, E = ()> = MatterStack<'a, WirelessBle<T, E>>;
 
 /// An implementation of the `Network` trait for a Matter stack running over
 /// BLE during commissioning, and then over either WiFi or Thread when operating.
@@ -465,7 +465,7 @@ where
     }
 }
 
-impl<const B: usize, T, E> MatterStack<'_, B, WirelessBle<T, E>>
+impl<T, E> MatterStack<'_, WirelessBle<T, E>>
 where
     T: WirelessNetwork,
     E: Embedding,
@@ -580,26 +580,17 @@ where
             self.matter().dev_comm().discriminator,
         );
 
-        let mut btp_task = pin_alloc!(
-            self.bump,
-            self.run_gatt_while_ble_commissionable(peripheral, &adv_data)
-        );
+        let mut btp_task = pin!(self.run_gatt_while_ble_commissionable(peripheral, &adv_data));
 
-        let mut net_task = pin_alloc!(
-            self.bump,
-            self.run_oper_net(
-                &crypto,
-                &net_stack,
-                0, // TODO
-                core::future::pending(),
-                Some((&self.network.btp, &self.network.btp))
-            )
-        );
+        let mut net_task = pin!(self.run_oper_net(
+            &crypto,
+            &net_stack,
+            0, // TODO
+            core::future::pending(),
+            Some((&self.network.btp, &self.network.btp))
+        ));
 
-        let mut mdns_task = pin_alloc!(
-            self.bump,
-            self.run_oper_netif_mdns(&crypto, &net_stack, &netif, &mut mdns)
-        );
+        let mut mdns_task = pin!(self.run_oper_netif_mdns(&crypto, &net_stack, &netif, &mut mdns));
 
         select3(&mut btp_task, &mut net_task, &mut mdns_task)
             .coalesce()
@@ -620,10 +611,7 @@ where
             self.matter().dev_comm().discriminator,
         );
 
-        let mut btp_task = pin_alloc!(
-            self.bump,
-            peripheral.run(&self.network.btp, "BT", &adv_data)
-        );
+        let mut btp_task = pin!(peripheral.run(&self.network.btp, "BT", &adv_data));
 
         let mut net_task =
             pin!(self.run_transport_net(&crypto, &self.network.btp, &self.network.btp, NoNetwork));
@@ -798,12 +786,12 @@ impl<S, N, C, M, G> PreexistingWireless<S, N, C, M, G> {
     }
 }
 
-pub(crate) struct MatterStackWirelessTask<'a, const B: usize, T, E, C, H, K, U, Q>
+pub(crate) struct MatterStackWirelessTask<'a, T, E, C, H, K, U, Q>
 where
     T: WirelessNetwork,
     E: Embedding,
 {
-    stack: &'a MatterStack<'a, B, WirelessBle<T, E>>,
+    stack: &'a MatterStack<'a, WirelessBle<T, E>>,
     crypto: C,
     handler: H,
     kv: K,

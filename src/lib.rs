@@ -19,7 +19,7 @@ use cfg_if::cfg_if;
 
 use edge_nal::{UdpBind, UdpSplitMulticast};
 
-use embassy_futures::select::{select, select_slice};
+use embassy_futures::select::select;
 use embassy_time::Duration;
 
 use rs_matter::crypto::{Crypto, Rng};
@@ -36,7 +36,7 @@ use rs_matter::error::{Error, ErrorCode};
 use rs_matter::im::{InteractionModel, InteractionModelState};
 use rs_matter::pairing::qr::QrTextType;
 use rs_matter::persist::{KvBlobStore, KvBlobStoreAccess};
-use rs_matter::respond::{DefaultResponder, ExchangeHandler, Responder};
+use rs_matter::respond::DefaultResponder;
 use rs_matter::sc::pase::MAX_COMM_WINDOW_TIMEOUT_SECS;
 use rs_matter::transport::exchange::MatterBuffers;
 use rs_matter::transport::network::{
@@ -49,7 +49,6 @@ use rs_matter::utils::sync::blocking::Mutex;
 use rs_matter::utils::sync::{DynBase, IfMutex};
 use rs_matter::{BasicCommData, Matter, MATTER_PORT};
 
-use crate::bump::Bump;
 use crate::mdns::{Mdns, MAX_NETIF_IPV6_ADDRS};
 use crate::nal::NetStack;
 use crate::network::Network;
@@ -67,7 +66,6 @@ extern crate alloc;
 pub(crate) mod fmt;
 
 pub mod ble;
-pub mod bump;
 pub mod eth;
 pub mod matter;
 pub mod mdns;
@@ -250,7 +248,7 @@ pub type MatterStackInteractionModelState<RN> =
 /// The `MatterStack` struct is the main entry point for the Matter stack.
 ///
 /// It wraps the actual `rs-matter` Matter instance and provides a simplified API for running the stack.
-pub struct MatterStack<'a, const B: usize, N>
+pub struct MatterStack<'a, N>
 where
     N: Network,
 {
@@ -259,7 +257,6 @@ where
     /// The interaction-model state: subscriptions table, events queue, the
     /// `rs-matter` networks store, and the KV scratch buffer, owned as one unit.
     state: MatterStackInteractionModelState<N::Networks>,
-    bump: Bump<B>,
     run_lock: IfMutex<()>,
     /// Whether the Interaction Model state (events watermark, networks store,
     /// persisted subscriptions) has already been re-hydrated from the KV store.
@@ -281,7 +278,7 @@ where
     //netif_conf: Signal<Option<NetifConf>>,
 }
 
-impl<'a, const B: usize, N> MatterStack<'a, B, N>
+impl<'a, N> MatterStack<'a, N>
 where
     N: Network,
 {
@@ -316,7 +313,6 @@ where
             matter: Matter::new(dev_det, dev_comm, dev_att, MATTER_PORT),
             buffers: MatterBuffers::new(),
             state: MatterStackInteractionModelState::new(N::NETWORKS),
-            bump: Bump::new(),
             run_lock: IfMutex::new(()),
             im_hydrated: Mutex::new(Cell::new(false)),
             network: N::INIT,
@@ -339,7 +335,6 @@ where
             ),
             buffers <- MatterBuffers::init(),
             state <- MatterStackInteractionModelState::init(N::init_networks()),
-            bump <- Bump::init(),
             run_lock <- IfMutex::init(()),
             im_hydrated: Mutex::new(Cell::new(false)),
             network <- N::init(),
@@ -719,29 +714,6 @@ where
         select(&mut responder, &mut im_job).coalesce().await
     }
 
-    async fn run_im_with_bump<C, H, K, RN, NC>(
-        &self,
-        im: &MatterStackInteractionModel<'_, C, H, K, RN, NC>,
-    ) -> Result<(), Error>
-    where
-        C: Crypto,
-        H: DataModel,
-        K: KvBlobStoreAccess,
-        RN: Networks,
-        NC: NetCtl + NetCtlStatus + WirelessDiag + NetChangeNotif,
-    {
-        // TODO
-        // Reset the Matter transport buffers and all sessions first
-        // self.matter().reset_transport()?;
-
-        self.startup_im(im).await?;
-
-        let mut responder = pin_alloc!(self.bump, self.run_responder_with_bump(im));
-        let mut im_job = pin!(im.run());
-
-        select(&mut responder, &mut im_job).coalesce().await
-    }
-
     /// Re-hydrate the Interaction Model state (events watermark, networks store,
     /// persisted subscriptions) and deliver the `Startup` lifecycle op to the
     /// cluster handlers - but only for the first Interaction Model instance that
@@ -785,60 +757,6 @@ where
         pin!(responder.run::<MAX_RESPONDERS, MAX_BUSY_RESPONDERS>()).await?;
 
         Ok(())
-    }
-
-    async fn run_responder_with_bump<C, H, K, RN, NC>(
-        &self,
-        im: &MatterStackInteractionModel<'_, C, H, K, RN, NC>,
-    ) -> Result<(), Error>
-    where
-        C: Crypto,
-        H: DataModel,
-        K: KvBlobStoreAccess,
-        RN: Networks,
-        NC: NetCtl + NetCtlStatus + WirelessDiag + NetChangeNotif,
-    {
-        let responder = DefaultResponder::new(im);
-
-        let mut actual = pin_alloc!(
-            self.bump,
-            self.run_one_responder_with_bump::<MAX_RESPONDERS, _>(responder.responder())
-        );
-        let mut busy = pin_alloc!(
-            self.bump,
-            self.run_one_responder_with_bump::<MAX_BUSY_RESPONDERS, _>(responder.busy_responder())
-        );
-
-        select(&mut actual, &mut busy).coalesce().await
-    }
-
-    /// Run a responder with Q handlers using the provided bump allocator.
-    async fn run_one_responder_with_bump<const Q: usize, T>(
-        &self,
-        responder: &Responder<'_, T>,
-    ) -> Result<(), Error>
-    where
-        T: ExchangeHandler,
-    {
-        info!("{}: Creating {} handlers", responder.name(), Q);
-
-        let mut handlers = heapless::Vec::<_, Q>::new();
-        debug!(
-            "{}: Handlers size: {}B",
-            responder.name(),
-            core::mem::size_of_val(&handlers)
-        );
-
-        for handler_id in 0..Q {
-            unwrap!(handlers
-                .push(pin_alloc!(self.bump, responder.handle(handler_id)))
-                .map_err(|_| ())); // Cannot fail because the vector has size N
-        }
-
-        let handlers = pin!(handlers);
-        let handlers = unsafe { handlers.map_unchecked_mut(|handlers| handlers.as_mut_slice()) };
-
-        select_slice(handlers).await.0
     }
 
     fn run_transport_net<'t, C, S, R, M>(
