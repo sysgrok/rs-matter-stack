@@ -6,13 +6,13 @@
 //! The primary use case of this allocator is reduction of Rust future sizes, due to
 //! `rustc` not being very intelligent w.r.t. stack usage in async functions.
 
+use core::cell::{Cell, UnsafeCell};
 use core::marker::PhantomData;
 use core::mem::MaybeUninit;
 use core::pin::Pin;
 use core::ptr::NonNull;
 
 use embassy_sync::blocking_mutex::raw::RawMutex;
-use rs_matter::utils::cell::RefCell;
 use rs_matter::utils::init::{init, zeroed, Init};
 use rs_matter::utils::sync::blocking::raw::MatterRawMutex;
 use rs_matter::utils::sync::blocking::Mutex;
@@ -33,7 +33,7 @@ macro_rules! pin_alloc {
 
 /// A bump allocator that uses a provided memory chunk
 pub struct Bump<const N: usize, M = MatterRawMutex> {
-    inner: Mutex<RefCell<Inner<N>>, M>,
+    inner: Mutex<Inner<N>, M>,
 }
 
 impl<const N: usize, M: RawMutex> Default for Bump<N, M> {
@@ -46,14 +46,14 @@ impl<const N: usize, M: RawMutex> Bump<N, M> {
     /// Create a new bump allocator
     pub const fn new() -> Self {
         Self {
-            inner: Mutex::new(RefCell::new(Inner::new())),
+            inner: Mutex::new(Inner::new()),
         }
     }
 
     /// Return an initializer for a new bump allocator
     pub fn init() -> impl Init<Self> {
         init!(Self {
-            inner <- Mutex::init(RefCell::init(Inner::init())),
+            inner <- Mutex::init(Inner::init()),
         })
     }
 
@@ -66,11 +66,7 @@ impl<const N: usize, M: RawMutex> Bump<N, M> {
     /// Make sure that NO previously allocated objects are still in use
     /// when calling this method.
     pub unsafe fn reset(&self) {
-        self.inner.lock(|inner| {
-            let mut inner = inner.borrow_mut();
-
-            inner.offset = 0;
-        });
+        self.inner.lock(|inner| inner.offset.set(0));
     }
 
     /// Allocate an object and return it pinned in a `Pin<BumpBox<T>>`
@@ -167,22 +163,26 @@ impl<const N: usize, M: RawMutex> Bump<N, M> {
         T: Sized,
     {
         self.inner.lock(|inner| {
-            let mut inner = inner.borrow_mut();
-
             let size = core::mem::size_of::<T>();
 
-            let offset = inner.offset;
-            let memory = unsafe { inner.memory.assume_init_mut() };
+            let offset = inner.offset.get();
 
             info!(
                 "BUMP[{}]: {}b (U:{}b/F:{}b)",
                 location,
                 size,
                 offset,
-                memory.len() - offset
+                N - offset
             );
 
-            let remaining = &mut memory[offset..];
+            // Safety: The memory past `offset` is not referenced by any previously handed out
+            // slot, so a unique slice over it does not alias with anything still in use
+            let remaining = unsafe {
+                core::slice::from_raw_parts_mut(
+                    inner.memory.get().cast::<MaybeUninit<u8>>().add(offset),
+                    N - offset,
+                )
+            };
             let remaining_len = remaining.len();
 
             let (t_buf, r_buf) = align_min::<T>(remaining, 1);
@@ -190,7 +190,7 @@ impl<const N: usize, M: RawMutex> Bump<N, M> {
             // Safety: `align_min` returns a non-empty, aligned slice for a non-ZST
             let ptr = unsafe { NonNull::new_unchecked(t_buf.as_mut_ptr()) };
 
-            inner.offset += remaining_len - r_buf.len();
+            inner.offset.set(offset + remaining_len - r_buf.len());
 
             ptr
         })
@@ -238,28 +238,37 @@ impl<T> Drop for BumpBox<'_, T> {
     }
 }
 
+/// The allocator state, only ever accessed through a shared reference.
+///
+/// Handed out slots stay in use across later allocations, so the allocator must never
+/// create a `&mut` covering the whole arena (as e.g. a `RefCell` borrow would): that would
+/// invalidate the pointers of all previously allocated `BumpBox`es under the Rust aliasing
+/// rules. Instead, each allocation only ever touches the still-unused tail of the arena.
 struct Inner<const N: usize> {
-    memory: MaybeUninit<[u8; N]>,
-    offset: usize,
+    memory: UnsafeCell<MaybeUninit<[u8; N]>>,
+    offset: Cell<usize>,
 }
 
 impl<const N: usize> Inner<N> {
     const fn new() -> Self {
         Self {
-            memory: MaybeUninit::uninit(),
-            offset: 0,
+            memory: UnsafeCell::new(MaybeUninit::uninit()),
+            offset: Cell::new(0),
         }
     }
 
     fn init() -> impl Init<Self> {
         init!(Self {
             memory <- zeroed(),
-            offset: 0,
+            offset: Cell::new(0),
         })
     }
 }
 
-fn align_min<T>(buf: &mut [u8], count: usize) -> (&mut [MaybeUninit<T>], &mut [u8]) {
+fn align_min<T>(
+    buf: &mut [MaybeUninit<u8>],
+    count: usize,
+) -> (&mut [MaybeUninit<T>], &mut [MaybeUninit<u8>]) {
     if count == 0 || core::mem::size_of::<T>() == 0 {
         return (&mut [], buf);
     }
@@ -282,4 +291,103 @@ fn align_min<T>(buf: &mut [u8], count: usize) -> (&mut [MaybeUninit<T>], &mut [u
     assert!(t_remaining_buf.is_empty());
 
     (t_buf, remaining_buf)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+
+    const BUMP_SIZE: usize = 1024;
+    const DEFAULT_VALUE: u32 = 0xDEADBEEF;
+
+    #[test]
+    fn test_one_concurrent_borrow() {
+        let bump = Bump::<BUMP_SIZE, NoopRawMutex>::new();
+
+        for _ in 0..(BUMP_SIZE / core::mem::size_of_val(&DEFAULT_VALUE)) {
+            let b1 = bump.alloc(DEFAULT_VALUE, "test1");
+
+            assert_eq!(*b1, DEFAULT_VALUE);
+        }
+    }
+
+    #[test]
+    fn test_multiple_concurrent_borrow() {
+        let bump = Bump::<BUMP_SIZE, NoopRawMutex>::new();
+
+        let mut all_boxes = alloc::vec::Vec::new();
+        for i in 0..(BUMP_SIZE / core::mem::size_of::<usize>()) {
+            all_boxes.push(alloc!(bump, i));
+        }
+
+        for (i, b) in all_boxes.into_iter().enumerate() {
+            assert_eq!(*b, i);
+        }
+    }
+
+    #[test]
+    fn test_interleaved_mutation() {
+        let bump = Bump::<BUMP_SIZE, NoopRawMutex>::new();
+
+        let mut a = bump.alloc([1u8; 3], "a");
+        let mut b = bump.alloc(2u64, "b");
+        a[1] = 10;
+        let c = bump.alloc([3u16; 5], "c");
+        *b += 1;
+        a[2] = 20;
+
+        assert_eq!(*a, [1, 10, 20]);
+        assert_eq!(*b, 3);
+        assert_eq!(*c, [3; 5]);
+
+        drop(b);
+        drop(a);
+
+        let d = bump.alloc(4u32, "d");
+        assert_eq!(*d, 4);
+        assert_eq!(*c, [3; 5]);
+    }
+
+    #[test]
+    fn test_pinned_future() {
+        use core::future::Future;
+        use core::task::{Context, Poll, Waker};
+
+        let bump = Bump::<BUMP_SIZE, NoopRawMutex>::new();
+
+        let mut polls = 0;
+        let mut fut = pin_alloc!(bump, async {
+            let buf = [7u8; 64];
+            core::future::poll_fn(|_| Poll::Ready(())).await;
+            buf.iter().map(|&b| b as usize).sum::<usize>()
+        });
+
+        let mut cx = Context::from_waker(Waker::noop());
+        loop {
+            polls += 1;
+            if let Poll::Ready(sum) = fut.as_mut().poll(&mut cx) {
+                assert_eq!(sum, 7 * 64);
+                break;
+            }
+        }
+        assert_eq!(polls, 1);
+    }
+
+    #[test]
+    fn test_reset_and_reuse() {
+        let bump = Bump::<BUMP_SIZE, NoopRawMutex>::new();
+
+        {
+            let mut b = bump.alloc([1u64; 8], "test");
+            b[0] = 42;
+            assert_eq!(b[0], 42);
+        }
+
+        unsafe { bump.reset() };
+
+        let b = bump.alloc(7u8, "test");
+        assert_eq!(*b, 7);
+    }
 }

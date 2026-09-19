@@ -10,7 +10,7 @@ description = "Utility for configuring and running rs-matter"
 repository = "https://github.com/sysgrok/rs-matter-stack"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
-rust-version = "1.87"
+rust-version = "1.89"
 
 #[patch.crates-io]
 #rs-matter = { git = "https://github.com/project-chip/rs-matter" }

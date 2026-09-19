@@ -80,3 +80,18 @@ jobs:
         if: ${{ !env.ACT && matrix.features == 'os' }}
         with:
           platform-name: cross-platform
+
+  miri:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Rust
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri, rust-src
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Miri
+        run: cargo miri test --no-default-features --features std --lib
