@@ -20,14 +20,14 @@ use rs_matter::utils::sync::blocking::Mutex;
 #[macro_export]
 macro_rules! alloc {
     ($bump:expr, $obj:expr) => {
-        $bump.alloc($obj, concat!(file!(), ":", line!()))
+        $bump.alloc_with(|| $obj, concat!(file!(), ":", line!()))
     };
 }
 
 #[macro_export]
 macro_rules! pin_alloc {
     ($bump:expr, $obj:expr) => {
-        $bump.pin_alloc($obj, concat!(file!(), ":", line!()))
+        $bump.pin_alloc_with(|| $obj, concat!(file!(), ":", line!()))
     };
 }
 
@@ -92,6 +92,9 @@ impl<const N: usize, M: RawMutex> Bump<N, M> {
 
     /// Allocate an object and return it in a `BumpBox<T>`
     ///
+    /// Prefer `alloc_with` (or the `alloc!` macro) for anything large: the object passed
+    /// here already exists on the caller's stack and is copied into the allocator memory.
+    ///
     /// # Arguments
     /// - `object`: The object to allocate
     /// - `location`: A string describing the location of the allocation, for logging purposes
@@ -102,10 +105,71 @@ impl<const N: usize, M: RawMutex> Bump<N, M> {
     where
         T: Sized,
     {
+        self.alloc_with(|| object, location)
+    }
+
+    /// Allocate an object constructed by `f` and return it pinned in a `Pin<BumpBox<T>>`
+    ///
+    /// See `alloc_with` for why construction is deferred to a closure.
+    ///
+    /// # Arguments
+    /// - `f`: A closure constructing the object
+    /// - `location`: A string describing the location of the allocation, for logging purposes
+    ///
+    /// # Panics
+    /// This function will panic if there is not enough memory left in the bump allocator
+    pub fn pin_alloc_with<T, F>(&self, f: F, location: &str) -> Pin<BumpBox<'_, T>>
+    where
+        T: Sized,
+        F: FnOnce() -> T,
+    {
+        self.alloc_with(f, location).into_pin()
+    }
+
+    /// Allocate an object constructed by `f` and return it in a `BumpBox<T>`
+    ///
+    /// The object is constructed directly inside the allocator memory. This matters for the
+    /// futures this allocator exists for: taking the future by value would first materialize
+    /// it on the caller's stack (which is what the allocator is there to avoid in the first
+    /// place) and only then copy it over.
+    ///
+    /// # Arguments
+    /// - `f`: A closure constructing the object
+    /// - `location`: A string describing the location of the allocation, for logging purposes
+    ///
+    /// # Panics
+    /// This function will panic if there is not enough memory left in the bump allocator
+    pub fn alloc_with<T, F>(&self, f: F, location: &str) -> BumpBox<'_, T>
+    where
+        T: Sized,
+        F: FnOnce() -> T,
+    {
+        let mut slot = self.reserve::<T>(location);
+
+        // The object is constructed here, outside of the allocator lock, so that the compiler
+        // can build it straight into its slot: moved into the `lock` closure instead, it would
+        // first be materialized on the stack of the caller and copied over from there.
+        //
+        // Safety: `reserve` handed out a properly aligned, exclusively owned slot
+        unsafe {
+            slot.as_mut().write(f());
+        }
+
+        BumpBox {
+            ptr: slot.cast(),
+            _allocator: PhantomData,
+        }
+    }
+
+    /// Reserve an uninitialized, properly aligned slot for a `T`
+    fn reserve<T>(&self, location: &str) -> NonNull<MaybeUninit<T>>
+    where
+        T: Sized,
+    {
         self.inner.lock(|inner| {
             let mut inner = inner.borrow_mut();
 
-            let size = core::mem::size_of_val(&object);
+            let size = core::mem::size_of::<T>();
 
             let offset = inner.offset;
             let memory = unsafe { inner.memory.assume_init_mut() };
@@ -123,20 +187,12 @@ impl<const N: usize, M: RawMutex> Bump<N, M> {
 
             let (t_buf, r_buf) = align_min::<T>(remaining, 1);
 
-            // Safety: We just allocated the memory and it's properly aligned
-            let ptr = unsafe {
-                let ptr = t_buf.as_ptr() as *mut T;
-                ptr.write(object);
-
-                NonNull::new_unchecked(ptr)
-            };
+            // Safety: `align_min` returns a non-empty, aligned slice for a non-ZST
+            let ptr = unsafe { NonNull::new_unchecked(t_buf.as_mut_ptr()) };
 
             inner.offset += remaining_len - r_buf.len();
 
-            BumpBox {
-                ptr,
-                _allocator: PhantomData,
-            }
+            ptr
         })
     }
 }
