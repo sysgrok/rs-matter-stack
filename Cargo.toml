@@ -1,6 +1,6 @@
 [package]
 name = "rs-matter-stack"
-version = "0.3.0"
+version = "0.3.1"
 authors = ["ivmarkov <ivan.markov@gmail.com>"]
 edition = "2021"
 resolver = "2"
@@ -260,7 +260,7 @@ scopeguard = { version = "1", default-features = false }
 embassy-futures = "0.1"
 embassy-sync = "0.8"
 embassy-time = "0.5"
-rs-matter = { version = "0.4", default-features = false }
+rs-matter = { version = "0.4.1", default-features = false }
 edge-nal = "0.7"
 edge-nal-std = { version = "0.7", optional = true }
 edge-mdns = { version = "0.8", optional = true }
