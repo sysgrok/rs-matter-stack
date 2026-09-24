@@ -167,7 +167,7 @@ impl<const N: usize, M: RawMutex> Bump<N, M> {
 
             let offset = inner.offset.get();
 
-            info!(
+            debug!(
                 "BUMP[{}]: {}b (U:{}b/F:{}b)",
                 location,
                 size,
