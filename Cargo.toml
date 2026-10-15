@@ -12,8 +12,8 @@ license = "MIT OR Apache-2.0"
 readme = "README.md"
 rust-version = "1.89"
 
-#[patch.crates-io]
-#rs-matter = { git = "https://github.com/project-chip/rs-matter" }
+[patch.crates-io]
+rs-matter = { git = "https://github.com/project-chip/rs-matter" }
 #rs-matter = { path = "../rs-matter/rs-matter" }
 
 [profile.dev]
