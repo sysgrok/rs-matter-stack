@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+* (Breaking) Ethernet diagnostics: `run_preex`, `PreexistingEthernet::new` and `EthernetTask::run` take an `EthDiag` (`&()` if there is nothing to report)
+* Thread and Wi-Fi diagnostics: forward the MAC/MLE counters and the other new optional attributes of the operational network controller
+
 ## [0.3.1] - 2026-09-20
 * Raise MSRV to 1.89
 * Significantly reduce bump memory with `Bump::alloc_with` / `Bump::pin_alloc_with`

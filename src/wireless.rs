@@ -230,7 +230,8 @@ where
 // both traits empty), and the `Operational` variant delegates to the real
 // controller. The defaults are: `Ok(None)` for the scalar accessors, `Ok(())` /
 // `f(None)` for the closure-based accessors, and `Nullable::none()` for the
-// `WifiDiag` nullable accessors — kept in sync with rs-matter's trait defaults.
+// `WifiDiag` nullable accessors, `Ok(0)` for the `ThreadDiag` overrun count — kept in sync
+// with rs-matter's trait defaults.
 impl<Q> wifi_diag::WifiDiag for WirelessNetCtl<'_, Q>
 where
     Q: wifi_diag::WifiDiag,
@@ -269,6 +270,60 @@ where
         match self {
             Self::Commissioning(_) => Ok(rs_matter::tlv::Nullable::none()),
             Self::Operational(q) => q.rssi(),
+        }
+    }
+    fn beacon_lost_count(&self) -> Result<rs_matter::tlv::Nullable<u32>, Error> {
+        match self {
+            Self::Commissioning(_) => Ok(rs_matter::tlv::Nullable::none()),
+            Self::Operational(q) => q.beacon_lost_count(),
+        }
+    }
+    fn beacon_rx_count(&self) -> Result<rs_matter::tlv::Nullable<u32>, Error> {
+        match self {
+            Self::Commissioning(_) => Ok(rs_matter::tlv::Nullable::none()),
+            Self::Operational(q) => q.beacon_rx_count(),
+        }
+    }
+    fn packet_multicast_rx_count(&self) -> Result<rs_matter::tlv::Nullable<u32>, Error> {
+        match self {
+            Self::Commissioning(_) => Ok(rs_matter::tlv::Nullable::none()),
+            Self::Operational(q) => q.packet_multicast_rx_count(),
+        }
+    }
+    fn packet_multicast_tx_count(&self) -> Result<rs_matter::tlv::Nullable<u32>, Error> {
+        match self {
+            Self::Commissioning(_) => Ok(rs_matter::tlv::Nullable::none()),
+            Self::Operational(q) => q.packet_multicast_tx_count(),
+        }
+    }
+    fn packet_unicast_rx_count(&self) -> Result<rs_matter::tlv::Nullable<u32>, Error> {
+        match self {
+            Self::Commissioning(_) => Ok(rs_matter::tlv::Nullable::none()),
+            Self::Operational(q) => q.packet_unicast_rx_count(),
+        }
+    }
+    fn packet_unicast_tx_count(&self) -> Result<rs_matter::tlv::Nullable<u32>, Error> {
+        match self {
+            Self::Commissioning(_) => Ok(rs_matter::tlv::Nullable::none()),
+            Self::Operational(q) => q.packet_unicast_tx_count(),
+        }
+    }
+    fn current_max_rate(&self) -> Result<rs_matter::tlv::Nullable<u64>, Error> {
+        match self {
+            Self::Commissioning(_) => Ok(rs_matter::tlv::Nullable::none()),
+            Self::Operational(q) => q.current_max_rate(),
+        }
+    }
+    fn overrun_count(&self) -> Result<rs_matter::tlv::Nullable<u64>, Error> {
+        match self {
+            Self::Commissioning(_) => Ok(rs_matter::tlv::Nullable::none()),
+            Self::Operational(q) => q.overrun_count(),
+        }
+    }
+    fn reset_counts(&self) -> Result<(), Error> {
+        match self {
+            Self::Commissioning(_) => Ok(()),
+            Self::Operational(q) => q.reset_counts(),
         }
     }
 }
@@ -410,6 +465,54 @@ where
         match self {
             Self::Commissioning(_) => Ok(()),
             Self::Operational(q) => q.active_network_faults_list(f),
+        }
+    }
+    fn mac_counters(
+        &self,
+        f: &mut dyn FnMut(Option<&thread_diag::MacCounters>) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        match self {
+            Self::Commissioning(_) => f(None),
+            Self::Operational(q) => q.mac_counters(f),
+        }
+    }
+    fn mle_counters(
+        &self,
+        f: &mut dyn FnMut(Option<&thread_diag::MleCounters>) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        match self {
+            Self::Commissioning(_) => f(None),
+            Self::Operational(q) => q.mle_counters(f),
+        }
+    }
+    fn overrun_count(&self) -> Result<u64, Error> {
+        match self {
+            Self::Commissioning(_) => Ok(0),
+            Self::Operational(q) => q.overrun_count(),
+        }
+    }
+    fn reset_counts(&self) -> Result<(), Error> {
+        match self {
+            Self::Commissioning(_) => Ok(()),
+            Self::Operational(q) => q.reset_counts(),
+        }
+    }
+    fn active_timestamp(&self) -> Result<Option<u64>, Error> {
+        match self {
+            Self::Commissioning(_) => Ok(None),
+            Self::Operational(q) => q.active_timestamp(),
+        }
+    }
+    fn pending_timestamp(&self) -> Result<Option<u64>, Error> {
+        match self {
+            Self::Commissioning(_) => Ok(None),
+            Self::Operational(q) => q.pending_timestamp(),
+        }
+    }
+    fn delay(&self) -> Result<Option<u32>, Error> {
+        match self {
+            Self::Commissioning(_) => Ok(None),
+            Self::Operational(q) => q.delay(),
         }
     }
 }
