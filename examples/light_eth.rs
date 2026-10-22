@@ -29,7 +29,7 @@ use rs_matter_stack::matter::dm::networks::unix::UnixNetifs;
 use rs_matter_stack::matter::dm::EmptyHandler;
 use rs_matter_stack::matter::dm::{Async, Dataver, Endpoint, Node};
 use rs_matter_stack::matter::error::Error;
-use rs_matter_stack::matter::persist::DirKvBlobStore;
+use rs_matter_stack::matter::persist::{DirKvBlobStore, VENDOR_KEYS_START};
 use rs_matter_stack::matter::transport::network::mdns::zeroconf::ZeroconfMdns;
 use rs_matter_stack::matter::utils::init::InitMaybeUninit;
 use rs_matter_stack::matter::{clusters, devices};
@@ -73,6 +73,8 @@ fn main() -> Result<(), Error> {
     let on_off = on_off::OnOffHandler::new_standalone(
         Dataver::new_rand(&mut rand),
         LIGHT_ENDPOINT_ID,
+        // The KV key under which the cluster persists its state
+        VENDOR_KEYS_START + 0x10,
         TestOnOffDeviceLogic::new(true),
     );
 
@@ -90,7 +92,7 @@ fn main() -> Result<(), Error> {
         )
         .chain(
             |e, c| e == LIGHT_ENDPOINT_ID && c == TestOnOffDeviceLogic::CLUSTER.id,
-            on_off::HandlerAsyncAdaptor(&on_off),
+            Async(on_off::HandlerAdaptor(&on_off)),
         )
         // Each Endpoint needs a Descriptor cluster too
         // Just use the one that `rs-matter` provides out of the box

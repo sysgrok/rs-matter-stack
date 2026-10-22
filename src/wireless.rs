@@ -748,25 +748,21 @@ where
     /// Resolve once `until` accepts the current commissioning window state, and return that
     /// state - so a caller that needs more than the predicate (typically the window's opener)
     /// does not have to read it a second time.
-    ///
-    /// Polled rather than driven by a notification: `rs-matter` signals a commissioning window
-    /// change only through the mDNS notification, and that is a single-slot `Notification`
-    /// already consumed by the mDNS task, so a second waiter would race it. Reacting a couple
-    /// of seconds late is of no consequence for what this drives.
     async fn wait_comm_window<F>(&self, until: F) -> CommWindowState
     where
         F: Fn(&CommWindowState) -> bool,
     {
-        const POLL_INTERVAL_SECS: u64 = 2;
-
         loop {
+            // Subscribe before reading the state, so that a change in between is not missed
+            let changed = self.matter().transport().wait_comm_window_changed();
+
             let state = self.matter().comm_window_state();
 
             if until(&state) {
                 break state;
             }
 
-            embassy_time::Timer::after(embassy_time::Duration::from_secs(POLL_INTERVAL_SECS)).await;
+            changed.await;
         }
     }
 }
