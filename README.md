@@ -176,6 +176,8 @@ fn main() -> Result<(), Error> {
         edge_nal_std::Stack::new(),
         // Will try to find a default network interface
         UnixNetifs,
+        // No Ethernet diagnostics to report
+        &(),
         // Will use the mDNS implementation based on the `zeroconf` crate
         ZeroconfMdns::new(),
         // The crypto provider

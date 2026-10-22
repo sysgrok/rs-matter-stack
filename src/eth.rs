@@ -3,6 +3,7 @@ use core::future::Future;
 use embassy_futures::select::select4;
 
 use rs_matter::crypto::Crypto;
+use rs_matter::dm::clusters::eth_diag::EthDiag;
 use rs_matter::dm::clusters::gen_diag::NetifDiag;
 use rs_matter::dm::clusters::net_comm::{DummyNetworks, NetworkType};
 use rs_matter::dm::endpoints::eth_net_handler;
@@ -83,13 +84,20 @@ where
 pub type EthMatterStack<'a, const B: usize, E = ()> = MatterStack<'a, B, Eth<E>>;
 
 /// A trait representing a task that needs access to the operational Ethernet interface
-/// (Network stack and Netif) to perform its work.
+/// (Network stack, Netif and Ethernet diagnostics) to perform its work.
 pub trait EthernetTask {
-    /// Run the task with the given network stack, network interface and mDNS
-    async fn run<S, N, M>(&mut self, net_stack: S, netif: N, mdns: M) -> Result<(), Error>
+    /// Run the task with the given network stack, network interface, Ethernet diagnostics and mDNS
+    async fn run<S, N, D, M>(
+        &mut self,
+        net_stack: S,
+        netif: N,
+        eth_diag: D,
+        mdns: M,
+    ) -> Result<(), Error>
     where
         S: NetStack,
         N: NetifDiag + NetChangeNotif,
+        D: EthDiag,
         M: Mdns;
 }
 
@@ -97,18 +105,20 @@ impl<T> EthernetTask for &mut T
 where
     T: EthernetTask,
 {
-    fn run<S, N, M>(
+    fn run<S, N, D, M>(
         &mut self,
         net_stack: S,
         netif: N,
+        eth_diag: D,
         mdns: M,
     ) -> impl Future<Output = Result<(), Error>>
     where
         S: NetStack,
         N: NetifDiag + NetChangeNotif,
+        D: EthDiag,
         M: Mdns,
     {
-        (*self).run(net_stack, netif, mdns)
+        (*self).run(net_stack, netif, eth_diag, mdns)
     }
 }
 
@@ -134,30 +144,39 @@ where
 
 /// A utility type for running an ethernet task with a pre-existing ethernet interface
 /// rather than bringing up / tearing down the ethernet interface for the task.
-pub struct PreexistingEthernet<S, N, M> {
+pub struct PreexistingEthernet<S, N, D, M> {
     stack: S,
     netif: N,
+    eth_diag: D,
     mdns: M,
 }
 
-impl<S, N, M> PreexistingEthernet<S, N, M> {
-    /// Create a new `PreexistingEthernet` instance with the given network interface, UDP stack and mDNS.
-    pub const fn new(stack: S, netif: N, mdns: M) -> Self {
-        Self { stack, netif, mdns }
+impl<S, N, D, M> PreexistingEthernet<S, N, D, M> {
+    /// Create a new `PreexistingEthernet` instance with the given UDP stack, network interface,
+    /// Ethernet diagnostics and mDNS.
+    pub const fn new(stack: S, netif: N, eth_diag: D, mdns: M) -> Self {
+        Self {
+            stack,
+            netif,
+            eth_diag,
+            mdns,
+        }
     }
 }
 
-impl<S, N, M> Ethernet for PreexistingEthernet<S, N, M>
+impl<S, N, D, M> Ethernet for PreexistingEthernet<S, N, D, M>
 where
     S: NetStack,
     N: NetifDiag + NetChangeNotif,
+    D: EthDiag,
     M: Mdns,
 {
     async fn run<T>(&mut self, mut task: T) -> Result<(), Error>
     where
         T: EthernetTask,
     {
-        task.run(&self.stack, &self.netif, &mut self.mdns).await
+        task.run(&self.stack, &self.netif, &self.eth_diag, &mut self.mdns)
+            .await
     }
 }
 
@@ -237,16 +256,18 @@ where
     /// # Arguments
     /// - `net_stack` - a user-provided network stack implementation
     /// - `netif` - a user-provided `Netif` implementation for the Ethernet network
+    /// - `eth_diag` - a user-provided `EthDiag` implementation (`&()` if it has nothing to report)
     /// - `mdns` - a user-provided mDNS implementation
     /// - `crypto` - a user-provided crypto implementation
     /// - `handler` - a user-provided DM handler implementation
     /// - `kv` - a user-provided `KvBlobStoreAccess` implementation for loading the persisted state of the stack
     /// - `user` - a user-provided future that will be polled only when the netif interface is up
     #[allow(clippy::too_many_arguments)]
-    pub fn run_preex<'t, U, N, M, C, H, K, X>(
+    pub fn run_preex<'t, U, N, D, M, C, H, K, X>(
         &'t self,
         net_stack: U,
         netif: N,
+        eth_diag: D,
         mdns: M,
         crypto: C,
         handler: H,
@@ -256,6 +277,7 @@ where
     where
         U: NetStack + 't,
         N: NetifDiag + NetChangeNotif + 't,
+        D: EthDiag + 't,
         M: Mdns + 't,
         C: Crypto + 't,
         H: DataModel + 't,
@@ -263,7 +285,7 @@ where
         X: UserTask + 't,
     {
         self.run(
-            PreexistingEthernet::new(net_stack, netif, mdns),
+            PreexistingEthernet::new(net_stack, netif, eth_diag, mdns),
             crypto,
             handler,
             kv,
@@ -365,10 +387,17 @@ where
     K: KvBlobStoreAccess,
     X: UserTask,
 {
-    async fn run<N, I, M>(&mut self, net_stack: N, netif: I, mut mdns: M) -> Result<(), Error>
+    async fn run<N, I, D, M>(
+        &mut self,
+        net_stack: N,
+        netif: I,
+        eth_diag: D,
+        mut mdns: M,
+    ) -> Result<(), Error>
     where
         N: NetStack,
         I: NetifDiag + NetChangeNotif,
+        D: EthDiag,
         M: Mdns,
     {
         info!("Ethernet driver started");
@@ -377,8 +406,14 @@ where
         // netif, which only exists here; chain them on top of the user's
         // handler, which owns everything else. `&self.handler` doubles as
         // the `Metadata` provider (`(M, H)` form for `InteractionModel::new`).
-        let combined =
-            eth_net_handler(&false, &(), &netif, &self.handler, self.crypto.weak_rand()?);
+        let combined = eth_net_handler(
+            &false,
+            &(),
+            &netif,
+            &eth_diag,
+            &self.handler,
+            self.crypto.weak_rand()?,
+        );
         // Ethernet does not manage networks, so use the inert wireless net-ctl;
         // the engine's connection-manager branch then stays dormant.
         let im = self.stack.im(
