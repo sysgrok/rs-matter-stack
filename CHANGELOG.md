@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * (Breaking) The `Network` trait loses `Networks`, `NETWORKS` and `init_networks`; `MatterStackInteractionModel` and `MatterStackInteractionModelState` lose their networks and network controller parameters
 * (Breaking) Ethernet diagnostics: `run_preex`, `PreexistingEthernet::new` and `EthernetTask::run` take an `EthDiag` (`&()` if there is nothing to report)
 * Thread and Wi-Fi diagnostics: forward the MAC/MLE counters and the other new optional attributes of the operational network controller
+* `InterfaceEnabled`: the operational network controller decides whether the interface can be disabled (`NetCtl::set_enabled`); it can't during BLE commissioning
 
 ## [0.3.1] - 2026-09-20
 * Raise MSRV to 1.89

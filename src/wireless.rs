@@ -142,6 +142,7 @@ where
 /// The `Commissioning` variant reproduces the behavior of the former
 /// `NoopWirelessNetCtl`: `scan` errors with `InvalidAction`, `connect` only
 /// checks the creds match the network type, and every diag returns its default.
+/// It refuses to disable the interface being commissioned.
 /// The `Operational` variant delegates to the real controller `Q`.
 ///
 /// `Q` is named identically at every phase via the wireless driver's associated
@@ -200,6 +201,14 @@ where
         match self {
             Self::Commissioning(_) => 0,
             Self::Operational(q) => q.thread_version(),
+        }
+    }
+
+    fn set_enabled(&self, enabled: bool) -> Result<(), Error> {
+        match self {
+            Self::Commissioning(_) if enabled => Ok(()),
+            Self::Commissioning(_) => Err(rs_matter::error::ErrorCode::InvalidAction.into()),
+            Self::Operational(q) => q.set_enabled(enabled),
         }
     }
 
