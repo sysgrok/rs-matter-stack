@@ -40,11 +40,19 @@ mod gatt;
 mod thread;
 mod wifi;
 
+/// The number of networks of the default wireless networks store.
+pub const MAX_WIRELESS_NETWORKS: usize = 2;
+
 /// A type alias for a Matter stack running over either Wifi or Thread (and BLE, during commissioning).
 ///
-/// `S` is the networks store of the Wifi or Thread interface, e.g. `WifiNetworks<2>`.
-pub type WirelessMatterStack<'a, const B: usize, T, S, E = ()> =
-    MatterStack<'a, B, WirelessBle<T, S, E>>;
+/// `S` is the networks store of the Wifi or Thread interface.
+pub type WirelessMatterStack<
+    'a,
+    const B: usize,
+    T,
+    E = (),
+    S = WirelessNetworks<MAX_WIRELESS_NETWORKS, T>,
+> = MatterStack<'a, B, WirelessBle<T, E, S>>;
 
 /// An implementation of the `Network` trait for a Matter stack running over
 /// BLE during commissioning, and then over either WiFi or Thread when operating.
@@ -60,8 +68,9 @@ pub type WirelessMatterStack<'a, const B: usize, T, S, E = ()> =
 /// devices which share a single wireless radio for both BLE and Wifi/Thread.
 ///
 /// `T` selects the operational network (`wireless::Wifi` or `wireless::Thread`) and
-/// `S` is the networks store of its interface - any `Networks` implementation.
-pub struct WirelessBle<T, S, E = ()>
+/// `S` is the networks store of its interface - any `Networks` implementation, by
+/// default `WirelessNetworks` with `MAX_WIRELESS_NETWORKS` networks.
+pub struct WirelessBle<T, E = (), S = WirelessNetworks<MAX_WIRELESS_NETWORKS, T>>
 where
     T: WirelessNetwork,
 {
@@ -77,7 +86,7 @@ where
     _network: PhantomData<fn() -> T>,
 }
 
-impl<T, S, E> WirelessBle<T, S, E>
+impl<T, S, E> WirelessBle<T, E, S>
 where
     T: WirelessNetwork,
     S: Embedding,
@@ -538,7 +547,7 @@ where
     }
 }
 
-impl<T, S, E> Default for WirelessBle<T, S, E>
+impl<T, S, E> Default for WirelessBle<T, E, S>
 where
     T: WirelessNetwork,
     S: Embedding,
@@ -549,7 +558,7 @@ where
     }
 }
 
-impl<T, S, E> Sealed for WirelessBle<T, S, E>
+impl<T, S, E> Sealed for WirelessBle<T, E, S>
 where
     T: WirelessNetwork,
     S: Embedding,
@@ -557,7 +566,7 @@ where
 {
 }
 
-impl<T, S, E> Network for WirelessBle<T, S, E>
+impl<T, S, E> Network for WirelessBle<T, E, S>
 where
     T: WirelessNetwork,
     S: Embedding,
@@ -583,7 +592,7 @@ where
     }
 }
 
-impl<const B: usize, T, NW, E> MatterStack<'_, B, WirelessBle<T, NW, E>>
+impl<const B: usize, T, NW, E> MatterStack<'_, B, WirelessBle<T, E, NW>>
 where
     T: WirelessNetwork,
     NW: Networks + Embedding,
@@ -913,7 +922,7 @@ where
     S: Embedding,
     E: Embedding,
 {
-    stack: &'a MatterStack<'a, B, WirelessBle<T, S, E>>,
+    stack: &'a MatterStack<'a, B, WirelessBle<T, E, S>>,
     networks: &'a mut S,
     crypto: C,
     handler: H,

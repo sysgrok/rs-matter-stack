@@ -10,7 +10,7 @@ use rs_matter::dm::clusters::net_comm::{NetCtl, NetworkType, Networks};
 use rs_matter::dm::clusters::thread_diag::ThreadDiag;
 use rs_matter::dm::endpoints::thread_net_handler;
 use rs_matter::dm::networks::wireless::{
-    self, connect_once, NetCtlWithStatusImpl, NoopWirelessNetCtl, MAX_CREDS_SIZE,
+    self, connect_once, NetCtlWithStatusImpl, NoopWirelessNetCtl, ThreadNetworks, MAX_CREDS_SIZE,
 };
 use rs_matter::dm::networks::NetChangeNotif;
 use rs_matter::dm::{DataModel, Endpoint};
@@ -23,18 +23,20 @@ use rs_matter::utils::select::Coalesce;
 use crate::mdns::Mdns;
 use crate::nal::NetStack;
 use crate::network::Embedding;
-use crate::wireless::{GattPeripheral, GattTask, MatterStackWirelessTask, WirelessNetCtl};
+use crate::wireless::{
+    GattPeripheral, GattTask, MatterStackWirelessTask, WirelessNetCtl, MAX_WIRELESS_NETWORKS,
+};
 use crate::{pin_alloc, UserTask};
 
 use super::{Gatt, PreexistingWireless, WirelessMatterStack};
 
 /// A type alias for a Matter stack running over Thread (and BLE, during commissioning).
 ///
-/// `S` is the networks store of the Thread interface, e.g. `ThreadNetworks<2>`.
-pub type ThreadMatterStack<'a, const B: usize, S, E = ()> =
-    WirelessMatterStack<'a, B, wireless::Thread, S, E>;
+/// `S` is the networks store of the Thread interface.
+pub type ThreadMatterStack<'a, const B: usize, E = (), S = ThreadNetworks<MAX_WIRELESS_NETWORKS>> =
+    WirelessMatterStack<'a, B, wireless::Thread, E, S>;
 
-impl<const B: usize, S, E> WirelessMatterStack<'_, B, wireless::Thread, S, E>
+impl<const B: usize, S, E> WirelessMatterStack<'_, B, wireless::Thread, E, S>
 where
     S: Networks + Embedding,
     E: Embedding,

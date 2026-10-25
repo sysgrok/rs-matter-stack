@@ -25,7 +25,6 @@ use rs_matter_stack::matter::dm::devices::DEV_TYPE_ON_OFF_LIGHT;
 use rs_matter_stack::matter::dm::endpoints::ROOT_ENDPOINT_ID;
 use rs_matter_stack::matter::dm::networks::unix::UnixNetifs;
 use rs_matter_stack::matter::dm::networks::wireless::NoopWirelessNetCtl;
-use rs_matter_stack::matter::dm::networks::wireless::WifiNetworks;
 use rs_matter_stack::matter::dm::EmptyHandler;
 use rs_matter_stack::matter::dm::{Async, Dataver, Endpoint, Node};
 use rs_matter_stack::matter::error::Error;
@@ -90,10 +89,7 @@ fn main() -> Result<(), Error> {
         // Chain any extra Endpoint 0 clusters of your own the same way.
         .chain(
             |e, _| e == ROOT_ENDPOINT_ID,
-            Async(WifiMatterStack::<0, WifiNetworks<2>>::root_handler(
-                &(),
-                &mut rand,
-            )),
+            Async(WifiMatterStack::<0, ()>::root_handler(&(), &mut rand)),
         )
         // Our on-off cluster, on Endpoint 1
         .chain(
@@ -146,7 +142,7 @@ fn main() -> Result<(), Error> {
 /// The Matter stack is allocated statically to avoid
 /// program stack blowups.
 /// It is also a mandatory requirement when the `WifiBle` stack variation is used.
-static MATTER_STACK: StaticCell<WifiMatterStack<BUMP_SIZE, WifiNetworks<2>>> = StaticCell::new();
+static MATTER_STACK: StaticCell<WifiMatterStack<BUMP_SIZE>> = StaticCell::new();
 
 /// Endpoint 0 (the root endpoint) runs the Matter system clusters,
 /// so we pick ID=1 for our light
@@ -155,7 +151,7 @@ const LIGHT_ENDPOINT_ID: u16 = 1;
 /// The Matter Light device Node
 const NODE: Node = Node {
     endpoints: &[
-        WifiMatterStack::<0, WifiNetworks<2>>::root_endpoint(),
+        WifiMatterStack::<0, ()>::root_endpoint(),
         Endpoint::new(
             LIGHT_ENDPOINT_ID,
             devices!(DEV_TYPE_ON_OFF_LIGHT),

@@ -10,7 +10,7 @@ use rs_matter::dm::clusters::net_comm::{NetCtl, NetworkType, Networks};
 use rs_matter::dm::clusters::wifi_diag::WifiDiag;
 use rs_matter::dm::endpoints::wifi_net_handler;
 use rs_matter::dm::networks::wireless::{
-    self, connect_once, NetCtlWithStatusImpl, NoopWirelessNetCtl, MAX_CREDS_SIZE,
+    self, connect_once, NetCtlWithStatusImpl, NoopWirelessNetCtl, WifiNetworks, MAX_CREDS_SIZE,
 };
 use rs_matter::dm::networks::NetChangeNotif;
 use rs_matter::dm::{DataModel, Endpoint};
@@ -23,18 +23,20 @@ use rs_matter::utils::select::Coalesce;
 use crate::mdns::Mdns;
 use crate::nal::NetStack;
 use crate::network::Embedding;
-use crate::wireless::{GattPeripheral, MatterStackWirelessTask, WirelessNetCtl};
+use crate::wireless::{
+    GattPeripheral, MatterStackWirelessTask, WirelessNetCtl, MAX_WIRELESS_NETWORKS,
+};
 use crate::{pin_alloc, UserTask};
 
 use super::{Gatt, GattTask, PreexistingWireless, WirelessMatterStack};
 
 /// A type alias for a Matter stack running over Wifi (and BLE, during commissioning).
 ///
-/// `S` is the networks store of the Wifi interface, e.g. `WifiNetworks<2>`.
-pub type WifiMatterStack<'a, const B: usize, S, E = ()> =
-    WirelessMatterStack<'a, B, wireless::Wifi, S, E>;
+/// `S` is the networks store of the Wifi interface.
+pub type WifiMatterStack<'a, const B: usize, E = (), S = WifiNetworks<MAX_WIRELESS_NETWORKS>> =
+    WirelessMatterStack<'a, B, wireless::Wifi, E, S>;
 
-impl<const B: usize, S, E> WirelessMatterStack<'_, B, wireless::Wifi, S, E>
+impl<const B: usize, S, E> WirelessMatterStack<'_, B, wireless::Wifi, E, S>
 where
     S: Networks + Embedding,
     E: Embedding,
