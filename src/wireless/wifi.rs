@@ -6,10 +6,12 @@ use embassy_futures::select::{select, select3, select4};
 
 use rs_matter::crypto::Crypto;
 use rs_matter::dm::clusters::gen_diag::NetifDiag;
-use rs_matter::dm::clusters::net_comm::{NetCtl, NetworkType};
+use rs_matter::dm::clusters::net_comm::{NetCtl, NetworkType, Networks};
 use rs_matter::dm::clusters::wifi_diag::WifiDiag;
 use rs_matter::dm::endpoints::wifi_net_handler;
-use rs_matter::dm::networks::wireless::{self, NetCtlWithStatusImpl, NoopWirelessNetCtl};
+use rs_matter::dm::networks::wireless::{
+    self, connect_once, NetCtlWithStatusImpl, NoopWirelessNetCtl, WifiNetworks, MAX_CREDS_SIZE,
+};
 use rs_matter::dm::networks::NetChangeNotif;
 use rs_matter::dm::{DataModel, Endpoint};
 use rs_matter::error::Error;
@@ -21,17 +23,22 @@ use rs_matter::utils::select::Coalesce;
 use crate::mdns::Mdns;
 use crate::nal::NetStack;
 use crate::network::Embedding;
-use crate::wireless::{GattPeripheral, MatterStackWirelessTask, WirelessNetCtl};
+use crate::wireless::{
+    GattPeripheral, MatterStackWirelessTask, WirelessNetCtl, MAX_WIRELESS_NETWORKS,
+};
 use crate::{pin_alloc, UserTask};
 
 use super::{Gatt, GattTask, PreexistingWireless, WirelessMatterStack};
 
 /// A type alias for a Matter stack running over Wifi (and BLE, during commissioning).
-pub type WifiMatterStack<'a, const B: usize, E = ()> =
-    WirelessMatterStack<'a, B, wireless::Wifi, E>;
+///
+/// `S` is the networks store of the Wifi interface.
+pub type WifiMatterStack<'a, const B: usize, E = (), S = WifiNetworks<MAX_WIRELESS_NETWORKS>> =
+    WirelessMatterStack<'a, B, wireless::Wifi, E, S>;
 
-impl<const B: usize, E> WirelessMatterStack<'_, B, wireless::Wifi, E>
+impl<const B: usize, S, E> WirelessMatterStack<'_, B, wireless::Wifi, E, S>
 where
+    S: Networks + Embedding,
     E: Embedding,
 {
     /// Run the Matter stack for an already pre-established wireless network where the BLE and the Wifi stacks can co-exist.
@@ -104,6 +111,9 @@ where
     {
         let _lock = self.run_lock.lock().await;
 
+        // Lent to the Network Commissioning handler of each phase
+        let mut networks = self.network.networks.lock().await;
+
         info!("Matter Stack memory: {}b", core::mem::size_of_val(self));
 
         // Since this is the last code executed in the method, resetting the allocator should be safe
@@ -116,7 +126,7 @@ where
 
         let net_task = pin_alloc!(
             self.bump,
-            self.run_wifi_coex(&mut wifi, crypto, handler, kv, user)
+            self.run_wifi_coex(&mut networks, &mut wifi, crypto, handler, kv, user)
         );
 
         net_task.await
@@ -147,6 +157,9 @@ where
     {
         let _lock = self.run_lock.lock().await;
 
+        // Lent to the Network Commissioning handler of each phase
+        let mut networks = self.network.networks.lock().await;
+
         info!("Matter Stack memory: {}b", core::mem::size_of_val(self));
 
         // Since this is the last code executed in the method, resetting the allocator should be safe
@@ -157,13 +170,17 @@ where
 
         self.matter().reset_transport()?;
 
-        let net_task = pin_alloc!(self.bump, self.run_wifi(wifi, crypto, handler, kv, user));
+        let net_task = pin_alloc!(
+            self.bump,
+            self.run_wifi(&mut networks, wifi, crypto, handler, kv, user)
+        );
 
         net_task.await
     }
 
     async fn run_wifi_coex<W, C, H, K, U>(
         &self,
+        networks: &mut S,
         wifi: &mut W,
         crypto: C,
         handler: H,
@@ -181,8 +198,9 @@ where
         // phantom net-ctl type is an irrelevant placeholder.
         // `&kv` is also lent to the driver so it can persist its own state.
         wifi.run(
-            MatterStackWirelessTask::<'_, _, _, _, _, _, _, _, NoopWirelessNetCtl> {
+            MatterStackWirelessTask::<'_, _, _, _, _, _, _, _, _, NoopWirelessNetCtl> {
                 stack: self,
+                networks,
                 crypto,
                 handler,
                 kv,
@@ -195,6 +213,7 @@ where
 
     async fn run_wifi<W, C, H, K, U>(
         &self,
+        networks: &mut S,
         mut wifi: W,
         crypto: C,
         handler: H,
@@ -223,8 +242,9 @@ where
 
                 Gatt::run(
                     &mut wifi,
-                    MatterStackWirelessTask::<'_, _, _, _, _, _, _, _, <W as Wifi>::NetCtl<'_>> {
+                    MatterStackWirelessTask::<'_, _, _, _, _, _, _, _, _, <W as Wifi>::NetCtl<'_>> {
                         stack: self,
+                        networks: &mut *networks,
                         crypto: &crypto,
                         handler: &handler,
                         kv: &kv,
@@ -237,8 +257,9 @@ where
 
             Wifi::run(
                 &mut wifi,
-                MatterStackWirelessTask::<'_, _, _, _, _, _, _, _, <W as Wifi>::NetCtl<'_>> {
+                MatterStackWirelessTask::<'_, _, _, _, _, _, _, _, _, <W as Wifi>::NetCtl<'_>> {
                     stack: self,
+                    networks: &mut *networks,
                     crypto: &crypto,
                     handler: &handler,
                     kv: &kv,
@@ -449,9 +470,10 @@ where
     }
 }
 
-impl<'a, const B: usize, E, C, H, K, U, Q> GattTask
-    for MatterStackWirelessTask<'a, B, wireless::Wifi, E, C, H, K, U, Q>
+impl<'a, const B: usize, S, E, C, H, K, U, Q> GattTask
+    for MatterStackWirelessTask<'a, B, wireless::Wifi, S, E, C, H, K, U, Q>
 where
+    S: Networks + Embedding,
     E: Embedding,
     C: Crypto,
     H: DataModel,
@@ -476,16 +498,16 @@ where
             &(),
             &(),
             &net_ctl,
+            &mut *self.networks,
             &net_ctl,
             &self.handler,
             self.crypto.weak_rand()?,
         );
-        // The network store comes from the stack's `state`; the (commissioning)
-        // net-ctl is threaded into the engine, whose `run` keeps its connection
-        // manager dormant while not commissioned.
+        // The Network Commissioning handler keeps its connection manager dormant
+        // while not commissioned, and the commissioning net-ctl defers connects.
         let im = self
             .stack
-            .im(&self.crypto, (&self.handler, combined), &self.kv, &net_ctl);
+            .im(&self.crypto, (&self.handler, combined), &self.kv);
 
         let mut btp_task = pin!(self.stack.run_btp(&self.crypto, peripheral));
 
@@ -495,9 +517,10 @@ where
     }
 }
 
-impl<'a, const B: usize, E, C, H, K, X, Z> WifiTask
-    for MatterStackWirelessTask<'a, B, wireless::Wifi, E, C, H, K, X, Z>
+impl<'a, const B: usize, S, E, C, H, K, X, Z> WifiTask
+    for MatterStackWirelessTask<'a, B, wireless::Wifi, S, E, C, H, K, X, Z>
 where
+    S: Networks + Embedding,
     E: Embedding,
     C: Crypto,
     H: DataModel,
@@ -525,23 +548,42 @@ where
             WirelessNetCtl::Operational(&net_ctl),
         );
 
+        // Non-concurrent commissioning deferred connect. In BLE-only commissioning
+        // the commissioner's `ConnectNetwork` is deferred (Wifi can't run during
+        // BLE) and must be replayed once the operational network is up but *before*
+        // `CommissioningComplete`. The handler's connection manager only connects
+        // *after* the device is commissioned, so this one-shot connect is
+        // performed here - before the handler borrows the networks store. The
+        // target network ID is the one the commissioner selected, remembered in
+        // `NetCtlState`.
+        let deferred_connect_id = self.stack.network.net_state.lock(|state| {
+            let state = state.borrow();
+            state.is_prov_ready().then(|| state.network_id.clone())
+        });
+
+        if let Some(network_id) = deferred_connect_id {
+            info!("Non-concurrent commissioning: performing the deferred connect");
+
+            let mut buf = [0u8; MAX_CREDS_SIZE];
+
+            connect_once(&mut *self.networks, &net_ctl_s, &network_id, &mut buf).await?;
+        }
+
+        // The Network Commissioning handler drives the maintenance `WirelessMgr`
+        // with the operational `net_ctl`.
         let combined = wifi_net_handler(
             &false,
             &(),
             &netif,
             &net_ctl_s,
+            &mut *self.networks,
             &net_ctl_s,
             &self.handler,
             self.crypto.weak_rand()?,
         );
-        // The operational `net_ctl` is threaded into the engine, which now drives
-        // the maintenance `WirelessMgr` itself (against the stack's networks store).
-        let im = self.stack.im(
-            &self.crypto,
-            (&self.handler, combined),
-            &self.kv,
-            &net_ctl_s,
-        );
+        let im = self
+            .stack
+            .im(&self.crypto, (&self.handler, combined), &self.kv);
 
         let stack = &self.stack;
 
@@ -555,26 +597,6 @@ where
 
         let mut mdns_task =
             pin!(stack.run_oper_netif_mdns(&self.crypto, &net_stack, &netif, &mut mdns));
-
-        // Non-concurrent commissioning deferred connect. In BLE-only commissioning
-        // the commissioner's `ConnectNetwork` is deferred (Wifi can't run during
-        // BLE) and must be replayed once the operational network is up but *before*
-        // `CommissioningComplete`. The engine's maintenance manager only connects
-        // *after* the device is commissioned, so this one-shot connect is still
-        // performed here. The target network ID is the one the commissioner
-        // selected, remembered in `NetCtlState`.
-        let deferred_connect_id = self.stack.network.net_state.lock(|state| {
-            let state = state.borrow();
-            state.is_prov_ready().then(|| state.network_id.clone())
-        });
-
-        if let Some(network_id) = deferred_connect_id {
-            info!("Non-concurrent commissioning: performing the deferred connect");
-
-            // The engine owns the networks + net-ctl; ask it to replay the
-            // deferred connect (no stack-owned `WirelessMgr`).
-            im.connect_once(&network_id).await?;
-        }
 
         let mut im_task = pin!(self.stack.run_im(&im));
 
@@ -602,9 +624,10 @@ where
     }
 }
 
-impl<'a, const B: usize, E, C, H, K, X, Z> WifiCoexTask
-    for MatterStackWirelessTask<'a, B, wireless::Wifi, E, C, H, K, X, Z>
+impl<'a, const B: usize, S, E, C, H, K, X, Z> WifiCoexTask
+    for MatterStackWirelessTask<'a, B, wireless::Wifi, S, E, C, H, K, X, Z>
 where
+    S: Networks + Embedding,
     E: Embedding,
     C: Crypto,
     H: DataModel,
@@ -634,24 +657,22 @@ where
             WirelessNetCtl::Operational(&net_ctl),
         );
 
+        // The Network Commissioning handler drives the maintenance `WirelessMgr`
+        // with the operational `net_ctl`; `run_net_coex` only runs the BTP coex
+        // transport.
         let combined = wifi_net_handler(
             &true,
             &(),
             &netif,
             &net_ctl_s,
+            &mut *self.networks,
             &net_ctl_s,
             &self.handler,
             self.crypto.weak_rand()?,
         );
-        // The operational `net_ctl` is threaded into the engine, which drives the
-        // maintenance `WirelessMgr` itself; `run_net_coex` only runs the BTP coex
-        // transport now.
-        let im = self.stack.im(
-            &self.crypto,
-            (&self.handler, combined),
-            &self.kv,
-            &net_ctl_s,
-        );
+        let im = self
+            .stack
+            .im(&self.crypto, (&self.handler, combined), &self.kv);
 
         let stack = &self.stack;
         let bump = &stack.bump;

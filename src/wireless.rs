@@ -5,25 +5,25 @@ use embassy_futures::select::{select, select3, select4};
 
 use rs_matter::crypto::Crypto;
 use rs_matter::dm::clusters::gen_diag::NetifDiag;
-use rs_matter::dm::clusters::net_comm::{self, NetCtlError, NetworkType, WirelessCreds};
+use rs_matter::dm::clusters::net_comm::{
+    self, remove_networks, NetCtlError, NetworkType, Networks, WirelessCreds,
+};
 use rs_matter::dm::clusters::wifi_diag::WirelessDiag;
 use rs_matter::dm::clusters::{thread_diag, wifi_diag};
-use rs_matter::dm::networks::wireless::{
-    NetCtlState, NoopWirelessNetCtl, WirelessNetwork, WirelessNetworks,
-};
+use rs_matter::dm::networks::wireless::{NetCtlState, WirelessNetwork, WirelessNetworks};
 use rs_matter::dm::networks::NetChangeNotif;
 use rs_matter::dm::DataModel;
 use rs_matter::error::Error;
 use rs_matter::pairing::DiscoveryCapabilities;
-use rs_matter::persist::KvBlobStore;
+use rs_matter::persist::{KvBlobStore, NETWORKS_KEY};
 use rs_matter::sc::pase::CommWindowState;
 use rs_matter::transport::network::btp::{AdvData, Btp};
 use rs_matter::transport::network::NoNetwork;
 use rs_matter::utils::cell::RefCell;
 use rs_matter::utils::init::{init, Init};
 use rs_matter::utils::select::Coalesce;
-use rs_matter::utils::sync::blocking;
 use rs_matter::utils::sync::DynBase;
+use rs_matter::utils::sync::{blocking, IfMutex};
 
 use crate::ble::GattPeripheral;
 use crate::mdns::Mdns;
@@ -40,10 +40,19 @@ mod gatt;
 mod thread;
 mod wifi;
 
+/// The number of networks of the default wireless networks store.
 pub const MAX_WIRELESS_NETWORKS: usize = 2;
 
 /// A type alias for a Matter stack running over either Wifi or Thread (and BLE, during commissioning).
-pub type WirelessMatterStack<'a, const B: usize, T, E = ()> = MatterStack<'a, B, WirelessBle<T, E>>;
+///
+/// `S` is the networks store of the Wifi or Thread interface.
+pub type WirelessMatterStack<
+    'a,
+    const B: usize,
+    T,
+    E = (),
+    S = WirelessNetworks<MAX_WIRELESS_NETWORKS, T>,
+> = MatterStack<'a, B, WirelessBle<T, E, S>>;
 
 /// An implementation of the `Network` trait for a Matter stack running over
 /// BLE during commissioning, and then over either WiFi or Thread when operating.
@@ -57,22 +66,30 @@ pub type WirelessMatterStack<'a, const B: usize, T, E = ()> = MatterStack<'a, B,
 ///
 /// This is done to save memory and to avoid the usage of BLE+Wifi/Thread co-exist drivers on
 /// devices which share a single wireless radio for both BLE and Wifi/Thread.
-pub struct WirelessBle<T, E = ()>
+///
+/// `T` selects the operational network (`wireless::Wifi` or `wireless::Thread`) and
+/// `S` is the networks store of its interface - any `Networks` implementation, by
+/// default `WirelessNetworks` with `MAX_WIRELESS_NETWORKS` networks.
+pub struct WirelessBle<T, E = (), S = WirelessNetworks<MAX_WIRELESS_NETWORKS, T>>
 where
     T: WirelessNetwork,
 {
     btp: Btp,
     net_state: blocking::Mutex<RefCell<NetCtlState>>,
+    /// The networks store of the operational network interface.
+    ///
+    /// `run` holds it locked throughout and lends it, as `&mut`, to the Network
+    /// Commissioning handler of each phase, so that the handler is its only
+    /// user meanwhile.
+    networks: IfMutex<S>,
     embedding: E,
-    // The wireless network type is no longer stored here (the networks store lives
-    // in the stack's `InteractionModelState`), but it still parameterizes the
-    // `Network::Networks` associated type, so keep it as a phantom marker.
     _network: PhantomData<fn() -> T>,
 }
 
-impl<T, E> WirelessBle<T, E>
+impl<T, S, E> WirelessBle<T, E, S>
 where
     T: WirelessNetwork,
+    S: Embedding,
     E: Embedding,
 {
     /// Creates a new instance of the `WirelessBle` network type.
@@ -80,6 +97,7 @@ where
         Self {
             btp: Btp::new(),
             net_state: NetCtlState::new_with_mutex(),
+            networks: IfMutex::new(S::INIT),
             embedding: E::INIT,
             _network: PhantomData,
         }
@@ -90,9 +108,21 @@ where
         init!(Self {
             btp <- Btp::init(),
             net_state <- NetCtlState::init_with_mutex(),
+            networks <- IfMutex::init(S::init()),
             embedding <- E::init(),
             _network: PhantomData,
         })
+    }
+}
+
+impl<const N: usize, T> Embedding for WirelessNetworks<N, T>
+where
+    T: WirelessNetwork,
+{
+    const INIT: Self = Self::new();
+
+    fn init() -> impl Init<Self> {
+        WirelessNetworks::init()
     }
 }
 
@@ -112,6 +142,7 @@ where
 /// The `Commissioning` variant reproduces the behavior of the former
 /// `NoopWirelessNetCtl`: `scan` errors with `InvalidAction`, `connect` only
 /// checks the creds match the network type, and every diag returns its default.
+/// It refuses to disable the interface being commissioned.
 /// The `Operational` variant delegates to the real controller `Q`.
 ///
 /// `Q` is named identically at every phase via the wireless driver's associated
@@ -170,6 +201,14 @@ where
         match self {
             Self::Commissioning(_) => 0,
             Self::Operational(q) => q.thread_version(),
+        }
+    }
+
+    fn set_enabled(&self, enabled: bool) -> Result<(), Error> {
+        match self {
+            Self::Commissioning(_) if enabled => Ok(()),
+            Self::Commissioning(_) => Err(rs_matter::error::ErrorCode::InvalidAction.into()),
+            Self::Operational(q) => q.set_enabled(enabled),
         }
     }
 
@@ -517,9 +556,10 @@ where
     }
 }
 
-impl<T, E> Default for WirelessBle<T, E>
+impl<T, S, E> Default for WirelessBle<T, E, S>
 where
     T: WirelessNetwork,
+    S: Embedding,
     E: Embedding,
 {
     fn default() -> Self {
@@ -527,16 +567,18 @@ where
     }
 }
 
-impl<T, E> Sealed for WirelessBle<T, E>
+impl<T, S, E> Sealed for WirelessBle<T, E, S>
 where
     T: WirelessNetwork,
+    S: Embedding,
     E: Embedding,
 {
 }
 
-impl<T, E> Network for WirelessBle<T, E>
+impl<T, S, E> Network for WirelessBle<T, E, S>
 where
     T: WirelessNetwork,
+    S: Embedding,
     E: Embedding,
 {
     const INIT: Self = Self::new();
@@ -546,17 +588,8 @@ where
     where
         Self: 'a;
 
-    // The wireless networks store, owned by the stack's `InteractionModelState`.
-    type Networks = WirelessNetworks<MAX_WIRELESS_NETWORKS, T>;
-
-    const NETWORKS: Self::Networks = WirelessNetworks::new();
-
     fn init() -> impl Init<Self> {
         WirelessBle::init()
-    }
-
-    fn init_networks() -> impl Init<Self::Networks> {
-        WirelessNetworks::init()
     }
 
     fn discovery_capabilities(&self) -> DiscoveryCapabilities {
@@ -568,9 +601,10 @@ where
     }
 }
 
-impl<const B: usize, T, E> MatterStack<'_, B, WirelessBle<T, E>>
+impl<const B: usize, T, NW, E> MatterStack<'_, B, WirelessBle<T, E, NW>>
 where
     T: WirelessNetwork,
+    NW: Networks + Embedding,
     E: Embedding,
 {
     /// Reset the Matter instance to the factory defaults by removing all fabrics and basic info settings
@@ -588,20 +622,14 @@ where
 
         self.matter.factory_reset(&kv)?;
 
-        // Reset the events counter and the wireless networks store so we don't
-        // carry stale state across a factory reset (Matter Core spec R1.5.1,
-        // §7.14.1.1 for the events watermark; the networks store holds the
-        // commissioned Wifi/Thread credentials).
-        // The net-ctl is inert here - a factory reset never drives the
-        // wireless connection manager.
-        self.im(
-            crypto,
-            handler,
-            &kv,
-            NoopWirelessNetCtl::new(NetworkType::Ethernet),
-        )
-        .factory_reset()
-        .await
+        // The stack's Network Commissioning handler is not part of `handler`,
+        // so the `FactoryReset` broadcast below does not reach its networks
+        // store (the commissioned Wifi/Thread credentials): reset it here.
+        remove_networks(self.network.networks.get_mut(), NETWORKS_KEY, &kv)?;
+
+        // Reset the events counter so we don't carry a stale watermark across a
+        // factory reset (Matter Core spec R1.5.1, §7.14.1.1).
+        self.im(crypto, handler, &kv).factory_reset().await
     }
 
     /// Run the startup sequence of the stack: re-hydrate the persisted state and
@@ -897,12 +925,14 @@ impl<S, N, C, M, G> PreexistingWireless<S, N, C, M, G> {
     }
 }
 
-pub(crate) struct MatterStackWirelessTask<'a, const B: usize, T, E, C, H, K, U, Q>
+pub(crate) struct MatterStackWirelessTask<'a, const B: usize, T, S, E, C, H, K, U, Q>
 where
     T: WirelessNetwork,
+    S: Embedding,
     E: Embedding,
 {
-    stack: &'a MatterStack<'a, B, WirelessBle<T, E>>,
+    stack: &'a MatterStack<'a, B, WirelessBle<T, E, S>>,
+    networks: &'a mut S,
     crypto: C,
     handler: H,
     kv: K,
