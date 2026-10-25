@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+* (Breaking) The networks store of the wireless stacks is a type parameter - `WifiMatterStack<'a, B, S, E>`, `ThreadMatterStack<'a, B, S, E>`, e.g. with `S` = `WifiNetworks<2>` - and lives in `WirelessBle`, lent to the Network Commissioning handler by `run`; `MAX_WIRELESS_NETWORKS` is gone
+* (Breaking) The `Network` trait loses `Networks`, `NETWORKS` and `init_networks`; `MatterStackInteractionModel` and `MatterStackInteractionModelState` lose their networks and network controller parameters
 * (Breaking) Ethernet diagnostics: `run_preex`, `PreexistingEthernet::new` and `EthernetTask::run` take an `EthDiag` (`&()` if there is nothing to report)
 * Thread and Wi-Fi diagnostics: forward the MAC/MLE counters and the other new optional attributes of the operational network controller
 

@@ -26,9 +26,7 @@ use rs_matter::crypto::{Crypto, Rng};
 use rs_matter::dm::clusters::basic_info::BasicInfoConfig;
 use rs_matter::dm::clusters::dev_att::DeviceAttestation;
 use rs_matter::dm::clusters::gen_diag::NetifDiag;
-use rs_matter::dm::clusters::net_comm::{NetCtl, NetCtlStatus, Networks};
 use rs_matter::dm::clusters::sw_diag::SwDiag;
-use rs_matter::dm::clusters::wifi_diag::WirelessDiag;
 use rs_matter::dm::endpoints::RootHandler;
 use rs_matter::dm::networks::NetChangeNotif;
 use rs_matter::dm::{AttrChangeNotifier, AttrId, ClusterId, DataModel, EndptId};
@@ -226,26 +224,22 @@ cfg_if! {
 
 const MAX_BUSY_RESPONDERS: usize = 2;
 
-pub type MatterStackInteractionModel<'a, C, H, K, RN, NC> = InteractionModel<
+pub type MatterStackInteractionModel<'a, C, H, K> = InteractionModel<
     'a,
     C,
     MatterBuffers<MAX_IM_BUFFERS>,
     H,
     K,
-    RN,
-    NC,
     // The accessory role: inbound `ReportData` is disowned.
     (),
     MAX_SUBSCRIPTIONS,
     EVENTS_RINGBUF_SIZE,
 >;
 
-/// The `InteractionModelState` specialization owned by `MatterStack`.
-///
-/// It owns the subscriptions table, the events queue and the `rs-matter`
-/// networks store as a single unit. The KV scratch buffer now lives in `Matter`.
-pub type MatterStackInteractionModelState<RN> =
-    InteractionModelState<RN, MAX_SUBSCRIPTIONS, EVENTS_RINGBUF_SIZE>;
+/// The `InteractionModelState` specialization owned by `MatterStack`: the
+/// subscriptions table and the events queue.
+pub type MatterStackInteractionModelState =
+    InteractionModelState<MAX_SUBSCRIPTIONS, EVENTS_RINGBUF_SIZE>;
 
 /// The `MatterStack` struct is the main entry point for the Matter stack.
 ///
@@ -256,13 +250,13 @@ where
 {
     matter: Matter<'a>,
     buffers: MatterBuffers<MAX_IM_BUFFERS>,
-    /// The interaction-model state: subscriptions table, events queue, the
-    /// `rs-matter` networks store, and the KV scratch buffer, owned as one unit.
-    state: MatterStackInteractionModelState<N::Networks>,
+    /// The interaction-model state: subscriptions table and events queue.
+    state: MatterStackInteractionModelState,
     bump: Bump<B>,
     run_lock: IfMutex<()>,
-    /// Whether the Interaction Model state (events watermark, networks store,
-    /// persisted subscriptions) has already been re-hydrated from the KV store.
+    /// Whether the Interaction Model state (events watermark, persisted
+    /// subscriptions) and the cluster handlers (the networks store among them)
+    /// have already been re-hydrated from the KV store.
     ///
     /// `InteractionModel::startup` cannot be driven from `MatterStack::startup`,
     /// because it has to run on the very Interaction Model instance that is then
@@ -315,7 +309,7 @@ where
         Self {
             matter: Matter::new(dev_det, dev_comm, dev_att, MATTER_PORT),
             buffers: MatterBuffers::new(),
-            state: MatterStackInteractionModelState::new(N::NETWORKS),
+            state: MatterStackInteractionModelState::new(),
             bump: Bump::new(),
             run_lock: IfMutex::new(()),
             im_hydrated: Mutex::new(Cell::new(false)),
@@ -338,7 +332,7 @@ where
                 MATTER_PORT,
             ),
             buffers <- MatterBuffers::init(),
-            state <- MatterStackInteractionModelState::init(N::init_networks()),
+            state <- MatterStackInteractionModelState::init(),
             bump <- Bump::init(),
             run_lock <- IfMutex::init(()),
             im_hydrated: Mutex::new(Cell::new(false)),
@@ -672,40 +666,30 @@ where
     }
 
     #[inline(always)]
-    fn im<C, H, K, NC>(
-        &self,
-        crypto: C,
-        handler: H,
-        kv: K,
-        net_ctl: NC,
-    ) -> MatterStackInteractionModel<'_, C, H, K, N::Networks, NC>
+    fn im<C, H, K>(&self, crypto: C, handler: H, kv: K) -> MatterStackInteractionModel<'_, C, H, K>
     where
         C: Crypto,
         H: DataModel,
         K: KvBlobStoreAccess,
-        NC: NetCtl + NetCtlStatus + WirelessDiag + NetChangeNotif,
     {
-        MatterStackInteractionModel::new_with_net_ctl(
+        MatterStackInteractionModel::new(
             self.matter(),
             crypto,
             &self.buffers,
             handler,
             kv,
-            net_ctl,
             &self.state,
         )
     }
 
-    async fn run_im<C, H, K, RN, NC>(
+    async fn run_im<C, H, K>(
         &self,
-        im: &MatterStackInteractionModel<'_, C, H, K, RN, NC>,
+        im: &MatterStackInteractionModel<'_, C, H, K>,
     ) -> Result<(), Error>
     where
         C: Crypto,
         H: DataModel,
         K: KvBlobStoreAccess,
-        RN: Networks,
-        NC: NetCtl + NetCtlStatus + WirelessDiag + NetChangeNotif,
     {
         // TODO
         // Reset the Matter transport buffers and all sessions first
@@ -719,16 +703,14 @@ where
         select(&mut responder, &mut im_job).coalesce().await
     }
 
-    async fn run_im_with_bump<C, H, K, RN, NC>(
+    async fn run_im_with_bump<C, H, K>(
         &self,
-        im: &MatterStackInteractionModel<'_, C, H, K, RN, NC>,
+        im: &MatterStackInteractionModel<'_, C, H, K>,
     ) -> Result<(), Error>
     where
         C: Crypto,
         H: DataModel,
         K: KvBlobStoreAccess,
-        RN: Networks,
-        NC: NetCtl + NetCtlStatus + WirelessDiag + NetChangeNotif,
     {
         // TODO
         // Reset the Matter transport buffers and all sessions first
@@ -742,23 +724,21 @@ where
         select(&mut responder, &mut im_job).coalesce().await
     }
 
-    /// Re-hydrate the Interaction Model state (events watermark, networks store,
-    /// persisted subscriptions) and deliver the `Startup` lifecycle op to the
-    /// cluster handlers - but only for the first Interaction Model instance that
-    /// this stack runs (see `im_hydrated`).
+    /// Re-hydrate the Interaction Model state (events watermark, persisted
+    /// subscriptions) and deliver the `Startup` lifecycle op to the cluster
+    /// handlers, which load the networks store among others - but only for the
+    /// first Interaction Model instance that this stack runs (see `im_hydrated`).
     ///
     /// `BasicInformation::StartUp` is emitted by `InteractionModel::run` itself,
     /// once per process lifetime.
-    async fn startup_im<C, H, K, RN, NC>(
+    async fn startup_im<C, H, K>(
         &self,
-        im: &MatterStackInteractionModel<'_, C, H, K, RN, NC>,
+        im: &MatterStackInteractionModel<'_, C, H, K>,
     ) -> Result<(), Error>
     where
         C: Crypto,
         H: DataModel,
         K: KvBlobStoreAccess,
-        RN: Networks,
-        NC: NetCtl + NetCtlStatus + WirelessDiag + NetChangeNotif,
     {
         if self.im_hydrated.lock(|hydrated| hydrated.replace(true)) {
             return Ok(());
@@ -767,16 +747,14 @@ where
         im.startup().await
     }
 
-    async fn run_responder<C, H, K, RN, NC>(
+    async fn run_responder<C, H, K>(
         &self,
-        im: &MatterStackInteractionModel<'_, C, H, K, RN, NC>,
+        im: &MatterStackInteractionModel<'_, C, H, K>,
     ) -> Result<(), Error>
     where
         C: Crypto,
         H: DataModel,
         K: KvBlobStoreAccess,
-        RN: Networks,
-        NC: NetCtl + NetCtlStatus + WirelessDiag + NetChangeNotif,
     {
         let responder = DefaultResponder::new(im);
 
@@ -787,16 +765,14 @@ where
         Ok(())
     }
 
-    async fn run_responder_with_bump<C, H, K, RN, NC>(
+    async fn run_responder_with_bump<C, H, K>(
         &self,
-        im: &MatterStackInteractionModel<'_, C, H, K, RN, NC>,
+        im: &MatterStackInteractionModel<'_, C, H, K>,
     ) -> Result<(), Error>
     where
         C: Crypto,
         H: DataModel,
         K: KvBlobStoreAccess,
-        RN: Networks,
-        NC: NetCtl + NetCtlStatus + WirelessDiag + NetChangeNotif,
     {
         let responder = DefaultResponder::new(im);
 

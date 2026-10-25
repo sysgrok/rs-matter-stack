@@ -5,9 +5,7 @@ use embassy_futures::select::select4;
 use rs_matter::crypto::Crypto;
 use rs_matter::dm::clusters::eth_diag::EthDiag;
 use rs_matter::dm::clusters::gen_diag::NetifDiag;
-use rs_matter::dm::clusters::net_comm::{DummyNetworks, NetworkType};
 use rs_matter::dm::endpoints::eth_net_handler;
-use rs_matter::dm::networks::wireless::NoopWirelessNetCtl;
 use rs_matter::dm::networks::NetChangeNotif;
 use rs_matter::dm::{DataModel, Endpoint};
 use rs_matter::error::Error;
@@ -15,7 +13,7 @@ use rs_matter::pairing::DiscoveryCapabilities;
 use rs_matter::persist::{KvBlobStore, KvBlobStoreAccess};
 use rs_matter::root_endpoint;
 use rs_matter::transport::network::NoNetwork;
-use rs_matter::utils::init::{init, init_from_closure, Init};
+use rs_matter::utils::init::{init, Init};
 use rs_matter::utils::select::Coalesce;
 
 use crate::mdns::Mdns;
@@ -51,24 +49,10 @@ where
     where
         E: 'a;
 
-    // Ethernet does not manage network credentials, so use the no-op networks store.
-    type Networks = DummyNetworks;
-
-    const NETWORKS: Self::Networks = DummyNetworks;
-
     fn init() -> impl Init<Self> {
         init!(Self {
             embedding <- E::init(),
         })
-    }
-
-    fn init_networks() -> impl Init<Self::Networks> {
-        unsafe {
-            init_from_closure(|slot: *mut DummyNetworks| {
-                slot.write(DummyNetworks);
-                Ok(())
-            })
-        }
     }
 
     fn discovery_capabilities(&self) -> DiscoveryCapabilities {
@@ -208,17 +192,9 @@ where
 
         self.matter.factory_reset(&kv)?;
 
-        // Reset the events counter (and the - no-op for Ethernet - networks store)
-        // so we don't carry a stale watermark across a factory reset
-        // (Matter Core spec R1.5.1, §7.14.1.1).
-        self.im(
-            crypto,
-            handler,
-            &kv,
-            NoopWirelessNetCtl::new(NetworkType::Ethernet),
-        )
-        .factory_reset()
-        .await
+        // Reset the events counter so we don't carry a stale watermark across a
+        // factory reset (Matter Core spec R1.5.1, §7.14.1.1).
+        self.im(crypto, handler, &kv).factory_reset().await
     }
 
     /// Run the startup sequence of the stack: re-hydrate the persisted state and
@@ -414,14 +390,9 @@ where
             &self.handler,
             self.crypto.weak_rand()?,
         );
-        // Ethernet does not manage networks, so use the inert wireless net-ctl;
-        // the engine's connection-manager branch then stays dormant.
-        let im = self.stack.im(
-            &self.crypto,
-            (&self.handler, combined),
-            &self.kv,
-            NoopWirelessNetCtl::new(NetworkType::Ethernet),
-        );
+        let im = self
+            .stack
+            .im(&self.crypto, (&self.handler, combined), &self.kv);
 
         let mut net_task = pin_alloc!(
             self.stack.bump,
