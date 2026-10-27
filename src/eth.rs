@@ -207,7 +207,7 @@ where
     /// instance that is then run: a resumed subscription borrows that instance's
     /// IM buffers, and constructing an `InteractionModel` clears the
     /// subscriptions table.
-    pub async fn startup<C, S>(&mut self, crypto: C, store: S) -> Result<(), Error>
+    pub async fn startup<C, S>(&self, crypto: C, store: S) -> Result<(), Error>
     where
         C: Crypto,
         S: KvBlobStore,
