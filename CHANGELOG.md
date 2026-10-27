@@ -6,6 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+* (Breaking) Update to the latest rs-matter: feature `sync-mutex` is renamed to `send-sync`, and `DynBase` (now `MaybeSendSync`) is implemented by `rs-matter` for every type, so own impls of it have to be removed
 * The networks store of the wireless stacks is a type parameter, `S`, after `E` - `WifiMatterStack<'a, B, E, S>`, `ThreadMatterStack<'a, B, E, S>` - by default a `WirelessNetworks` with `MAX_WIRELESS_NETWORKS` networks; it lives in `WirelessBle`, lent to the Network Commissioning handler by `run`
 * (Breaking) The `Network` trait loses `Networks`, `NETWORKS` and `init_networks`; `MatterStackInteractionModel` and `MatterStackInteractionModelState` lose their networks and network controller parameters
 * (Breaking) Ethernet diagnostics: `run_preex`, `PreexistingEthernet::new` and `EthernetTask::run` take an `EthDiag` (`&()` if there is nothing to report)

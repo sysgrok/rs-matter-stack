@@ -203,7 +203,7 @@ log = ["dep:log", "rs-matter/log", "edge-mdns?/log"]
 defmt = ["dep:defmt", "rs-matter/defmt", "heapless/defmt", "edge-mdns?/defmt"]
 # Build `rs-matter` with support for work-stealing executors, like the default Tokio executor.
 # This is a WIP feature and not yet fully supported.
-sync-mutex = ["rs-matter/sync-mutex"]
+send-sync = ["rs-matter/send-sync"]
 # Enable the zBus proxies for a range of Linux dBus services used by `rs-matter` (off by default due to slow compilation).
 zbus = ["rs-matter/zbus"]
 # mDNS support for Linux and Windows (via Avahi or Bonjour).

@@ -44,7 +44,7 @@ use rs_matter::utils::init::{init, Init};
 use rs_matter::utils::select::Coalesce;
 use rs_matter::utils::storage::Vec;
 use rs_matter::utils::sync::blocking::Mutex;
-use rs_matter::utils::sync::{DynBase, IfMutex};
+use rs_matter::utils::sync::IfMutex;
 use rs_matter::{BasicCommData, Matter, MATTER_PORT};
 
 use crate::bump::Bump;
@@ -874,8 +874,6 @@ impl UserTask for () {
 
 // The data model is not created yet, so we don't have to notify anything
 pub(crate) struct DummyAttrNotifier;
-
-impl DynBase for DummyAttrNotifier {}
 
 impl AttrChangeNotifier for DummyAttrNotifier {
     fn notify_attr_changed(&self, _endpoint_id: EndptId, _cluster_id: ClusterId, _attr_id: AttrId) {

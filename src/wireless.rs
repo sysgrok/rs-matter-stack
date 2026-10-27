@@ -22,7 +22,6 @@ use rs_matter::transport::network::NoNetwork;
 use rs_matter::utils::cell::RefCell;
 use rs_matter::utils::init::{init, Init};
 use rs_matter::utils::select::Coalesce;
-use rs_matter::utils::sync::DynBase;
 use rs_matter::utils::sync::{blocking, IfMutex};
 
 use crate::ble::GattPeripheral;
@@ -245,12 +244,6 @@ where
         }
     }
 }
-
-#[cfg(feature = "sync-mutex")]
-impl<Q> DynBase for WirelessNetCtl<'_, Q> where Q: Send + Sync {}
-
-#[cfg(not(feature = "sync-mutex"))]
-impl<Q> DynBase for WirelessNetCtl<'_, Q> {}
 
 impl<Q> WirelessDiag for WirelessNetCtl<'_, Q>
 where
