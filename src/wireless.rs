@@ -1,8 +1,6 @@
 use core::marker::PhantomData;
 use core::pin::pin;
 
-use embassy_futures::select::{select, select3, select4};
-
 use rs_matter::crypto::Crypto;
 use rs_matter::dm::clusters::gen_diag::NetifDiag;
 use rs_matter::dm::clusters::net_comm::{
@@ -20,9 +18,10 @@ use rs_matter::sc::pase::CommWindowState;
 use rs_matter::transport::network::btp::{AdvData, Btp};
 use rs_matter::transport::network::NoNetwork;
 use rs_matter::utils::cell::RefCell;
+use rs_matter::utils::futures::{select, select3, select4, Coalesce};
 use rs_matter::utils::init::{init, Init};
-use rs_matter::utils::select::Coalesce;
 use rs_matter::utils::sync::{blocking, IfMutex};
+use rs_matter::utils::timers::{Duration, Timer};
 
 use crate::ble::GattPeripheral;
 use crate::mdns::Mdns;
@@ -770,7 +769,7 @@ where
             // ====================== PANIC ======================
             // panicked at /home/ivan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/esp-wifi-0.12.0/src/ble/npl.rs:914:9:
             // timed eventq_get not yet supported - go implement it!
-            embassy_time::Timer::after(embassy_time::Duration::from_secs(2)).await;
+            Timer::after(Duration::from_secs(2)).await;
 
             Ok(())
         });

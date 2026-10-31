@@ -1,7 +1,5 @@
 use core::future::Future;
 
-use embassy_futures::select::select4;
-
 use rs_matter::crypto::Crypto;
 use rs_matter::dm::clusters::eth_diag::EthDiag;
 use rs_matter::dm::clusters::gen_diag::NetifDiag;
@@ -13,8 +11,8 @@ use rs_matter::pairing::DiscoveryCapabilities;
 use rs_matter::persist::{KvBlobStore, KvBlobStoreAccess};
 use rs_matter::root_endpoint;
 use rs_matter::transport::network::NoNetwork;
+use rs_matter::utils::futures::{select4, Coalesce};
 use rs_matter::utils::init::{init, Init};
-use rs_matter::utils::select::Coalesce;
 
 use crate::mdns::Mdns;
 use crate::nal::NetStack;

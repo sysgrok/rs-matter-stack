@@ -19,9 +19,6 @@ use cfg_if::cfg_if;
 
 use edge_nal::{UdpBind, UdpSplitMulticast};
 
-use embassy_futures::select::{select, select_slice};
-use embassy_time::Duration;
-
 use rs_matter::crypto::{Crypto, Rng};
 use rs_matter::dm::clusters::basic_info::BasicInfoConfig;
 use rs_matter::dm::clusters::dev_att::DeviceAttestation;
@@ -40,11 +37,12 @@ use rs_matter::transport::exchange::MatterBuffers;
 use rs_matter::transport::network::{
     Address, ChainedNetwork, NetworkMulticast, NetworkReceive, NetworkSend, NoNetwork,
 };
+use rs_matter::utils::futures::{select, select_slice, Coalesce};
 use rs_matter::utils::init::{init, Init};
-use rs_matter::utils::select::Coalesce;
 use rs_matter::utils::storage::Vec;
 use rs_matter::utils::sync::blocking::Mutex;
 use rs_matter::utils::sync::IfMutex;
+use rs_matter::utils::timers::{Duration, Timer};
 use rs_matter::{BasicCommData, Matter, MATTER_PORT};
 
 use crate::bump::Bump;
@@ -649,7 +647,7 @@ where
                             .await;
 
                         warn!("mDNS failed with {:?}, retrying in 5s...", _result);
-                        embassy_time::Timer::after(Duration::from_secs(5)).await;
+                        Timer::after(Duration::from_secs(5)).await;
                     }
                 } else {
                     info!("Netif down");
@@ -798,7 +796,7 @@ where
     {
         info!("{}: Creating {} handlers", responder.name(), Q);
 
-        let mut handlers = heapless::Vec::<_, Q>::new();
+        let mut handlers = Vec::<_, Q>::new();
         debug!(
             "{}: Handlers size: {}B",
             responder.name(),

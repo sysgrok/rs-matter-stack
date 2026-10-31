@@ -10,7 +10,7 @@ description = "Utility for configuring and running rs-matter"
 repository = "https://github.com/sysgrok/rs-matter-stack"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
-rust-version = "1.89"
+rust-version = "1.92"
 
 [patch.crates-io]
 rs-matter = { git = "https://github.com/project-chip/rs-matter" }
@@ -200,7 +200,7 @@ kv-blob-store-1024 = ["rs-matter/kv-blob-store-1024"]
 # Enable support for `log` logging (for embedded and OS targets).
 log = ["dep:log", "rs-matter/log", "edge-mdns?/log"]
 # Enable support for `defmt` logging (for embedded targets).
-defmt = ["dep:defmt", "rs-matter/defmt", "heapless/defmt", "edge-mdns?/defmt"]
+defmt = ["dep:defmt", "rs-matter/defmt", "edge-mdns?/defmt"]
 # Build `rs-matter` with support for work-stealing executors, like the default Tokio executor.
 # This is a WIP feature and not yet fully supported.
 send-sync = ["rs-matter/send-sync"]
@@ -221,7 +221,7 @@ mbedtls = ["rs-matter/mbedtls"]
 # Crypto backend: OpenSSL (not usable for baremetal targets, only for OS targets with OpenSSL installed).
 openssl = ["rs-matter/openssl"]
 # Umbrella set of features for typical OS-based non-baremetal deployments.
-os = ["backtrace", "rs-matter/os", "rustcrypto", "embassy-time/std"]
+os = ["backtrace", "rs-matter/os", "rustcrypto"]
 # Enable backtrace capturing (useful for debugging).
 backtrace = ["std", "rs-matter/backtrace"]
 # Use the `async-io-mini` Reactor rather than `async-io` (useful for embedded Rust STD targets like ESP-IDF).
@@ -253,13 +253,9 @@ examples = ["log", "os", "nix", "embassy-time-queue-utils/generic-queue-64", "ze
 cfg-if = "1"
 log = { version = "0.4", default-features = false, optional = true }
 defmt = { version = "1", default-features = false, optional = true, features = ["ip_in_core"] }
-heapless = { version = "0.9", default-features = false }
 enumset = { version = "1", default-features = false }
 bitflags = { version =  "2.5", default-features = false }
 scopeguard = { version = "1", default-features = false }
-embassy-futures = "0.1"
-embassy-sync = "0.8"
-embassy-time = "0.5"
 rs-matter = { version = "0.4.1", default-features = false }
 edge-nal = "0.7"
 edge-nal-std = { version = "0.7", optional = true }

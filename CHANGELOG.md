@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+* Raise MSRV to 1.92, as per `rs-matter`
+* Use `rs-matter`'s `utils::futures`, `utils::timers` and `utils::storage` instead of depending on `embassy-futures`, `embassy-time`, `embassy-sync` and `heapless`
+  * (Breaking) `Bump` loses its raw mutex parameter and always uses `MatterRawMutex`
 * (Breaking) Update to the latest rs-matter: feature `sync-mutex` is renamed to `send-sync`, and `DynBase` (now `MaybeSendSync`) is implemented by `rs-matter` for every type, so own impls of it have to be removed
 * The networks store of the wireless stacks is a type parameter, `S`, after `E` - `WifiMatterStack<'a, B, E, S>`, `ThreadMatterStack<'a, B, E, S>` - by default a `WirelessNetworks` with `MAX_WIRELESS_NETWORKS` networks; it lives in `WirelessBle`, lent to the Network Commissioning handler by `run`
 * (Breaking) The `Network` trait loses `Networks`, `NETWORKS` and `init_networks`; `MatterStackInteractionModel` and `MatterStackInteractionModelState` lose their networks and network controller parameters

@@ -12,9 +12,7 @@ use core::mem::MaybeUninit;
 use core::pin::Pin;
 use core::ptr::NonNull;
 
-use embassy_sync::blocking_mutex::raw::RawMutex;
 use rs_matter::utils::init::{init, zeroed, Init};
-use rs_matter::utils::sync::blocking::raw::MatterRawMutex;
 use rs_matter::utils::sync::blocking::Mutex;
 
 #[macro_export]
@@ -32,17 +30,17 @@ macro_rules! pin_alloc {
 }
 
 /// A bump allocator that uses a provided memory chunk
-pub struct Bump<const N: usize, M = MatterRawMutex> {
-    inner: Mutex<Inner<N>, M>,
+pub struct Bump<const N: usize> {
+    inner: Mutex<Inner<N>>,
 }
 
-impl<const N: usize, M: RawMutex> Default for Bump<N, M> {
+impl<const N: usize> Default for Bump<N> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<const N: usize, M: RawMutex> Bump<N, M> {
+impl<const N: usize> Bump<N> {
     /// Create a new bump allocator
     pub const fn new() -> Self {
         Self {
@@ -297,14 +295,12 @@ fn align_min<T>(
 mod tests {
     use super::*;
 
-    use embassy_sync::blocking_mutex::raw::NoopRawMutex;
-
     const BUMP_SIZE: usize = 1024;
     const DEFAULT_VALUE: u32 = 0xDEADBEEF;
 
     #[test]
     fn test_one_concurrent_borrow() {
-        let bump = Bump::<BUMP_SIZE, NoopRawMutex>::new();
+        let bump = Bump::<BUMP_SIZE>::new();
 
         for _ in 0..(BUMP_SIZE / core::mem::size_of_val(&DEFAULT_VALUE)) {
             let b1 = bump.alloc(DEFAULT_VALUE, "test1");
@@ -315,7 +311,7 @@ mod tests {
 
     #[test]
     fn test_multiple_concurrent_borrow() {
-        let bump = Bump::<BUMP_SIZE, NoopRawMutex>::new();
+        let bump = Bump::<BUMP_SIZE>::new();
 
         let mut all_boxes = alloc::vec::Vec::new();
         for i in 0..(BUMP_SIZE / core::mem::size_of::<usize>()) {
@@ -329,7 +325,7 @@ mod tests {
 
     #[test]
     fn test_interleaved_mutation() {
-        let bump = Bump::<BUMP_SIZE, NoopRawMutex>::new();
+        let bump = Bump::<BUMP_SIZE>::new();
 
         let mut a = bump.alloc([1u8; 3], "a");
         let mut b = bump.alloc(2u64, "b");
@@ -355,7 +351,7 @@ mod tests {
         use core::future::Future;
         use core::task::{Context, Poll, Waker};
 
-        let bump = Bump::<BUMP_SIZE, NoopRawMutex>::new();
+        let bump = Bump::<BUMP_SIZE>::new();
 
         let mut polls = 0;
         let mut fut = pin_alloc!(bump, async {
@@ -377,7 +373,7 @@ mod tests {
 
     #[test]
     fn test_reset_and_reuse() {
-        let bump = Bump::<BUMP_SIZE, NoopRawMutex>::new();
+        let bump = Bump::<BUMP_SIZE>::new();
 
         {
             let mut b = bump.alloc([1u64; 8], "test");

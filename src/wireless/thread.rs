@@ -2,8 +2,6 @@ use core::future::Future;
 use core::marker::PhantomData;
 use core::pin::pin;
 
-use embassy_futures::select::{select, select3, select4};
-
 use rs_matter::crypto::Crypto;
 use rs_matter::dm::clusters::gen_diag::NetifDiag;
 use rs_matter::dm::clusters::net_comm::{NetCtl, NetworkType, Networks};
@@ -18,7 +16,7 @@ use rs_matter::error::Error;
 use rs_matter::persist::KvBlobStoreAccess;
 use rs_matter::root_endpoint;
 use rs_matter::transport::network::NoNetwork;
-use rs_matter::utils::select::Coalesce;
+use rs_matter::utils::futures::{select, select3, select4, Coalesce};
 
 use crate::mdns::Mdns;
 use crate::nal::NetStack;

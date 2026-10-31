@@ -7,6 +7,7 @@ use edge_nal::{UdpBind, UdpSplit};
 use rs_matter::crypto::Crypto;
 use rs_matter::error::{Error, ErrorCode};
 use rs_matter::transport::network::mdns::builtin::BuiltinMdns;
+use rs_matter::utils::storage::String;
 use rs_matter::Matter;
 
 use crate::udp;
@@ -119,7 +120,7 @@ impl Mdns for BuiltinMdns {
 
         let (recv, send) = socket.split();
 
-        let mut hostname = heapless::String::<16>::new();
+        let mut hostname = String::<16>::new();
         if mac.len() == 6 {
             write_unwrap!(
                 hostname,
